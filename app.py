@@ -134,7 +134,11 @@ def parse_receipt(text, currency_code="USD"):
     merchant = next((line[:80] for line in lines[:6] if not re.search(r"receipt|invoice|tel|phone|date|\d{3}[-.) ]?\d{3}[-. ]?\d{4}", line, re.I)), "Receipt purchase")
     return {"amount": amount, "date": receipt_date, "date_was_read": date_was_read, "category": category, "merchant": merchant, "text": text}
 
-st.markdown("""
+st.sidebar.markdown('<div class="eyebrow">FINSIGHT / PERSONAL OS</div>', unsafe_allow_html=True)
+st.sidebar.title("◈ Your space")
+appearance = st.sidebar.radio("Appearance", ["Light", "Dark"], horizontal=True, key="appearance")
+
+LIGHT_CSS = """
 <style>
 .stApp { background:#f3f6fb; color:#172033; }
 [data-testid="stHeader"] { background:rgba(243,246,251,.96); }
@@ -158,14 +162,41 @@ div.stButton > button[kind="primaryFormSubmit"], div.stButton > button[kind="pri
 div.stButton > button[kind="secondary"] { background:#ffffff; border:1px solid #cbd5e1; color:#263449; border-radius:12px; }
 hr { border-color:#dce5ef; }
 </style>
-""", unsafe_allow_html=True)
+"""
+
+DARK_CSS = """
+<style>
+.stApp { background:radial-gradient(ellipse at 70% -15%,#17315a 0%,#0a1221 42%,#070b13 100%); color:#e7eff8; }
+[data-testid="stHeader"] { background:transparent; }
+[data-testid="stSidebar"] { background:linear-gradient(180deg,#101a2a,#0b111d); border-right:1px solid #25364b; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"], [data-testid="stSidebar"] label, [data-testid="stSidebar"] p { color:#c5d4e2; }
+.block-container { padding-top:2rem; max-width:1440px; }
+html, body, [class*="css"] { font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+h1,h2,h3,h4 { color:#f2f8ff; letter-spacing:-.035em; }
+.eyebrow { color:#53f1df; font:600 12px 'DM Mono',monospace; letter-spacing:.16em; text-transform:uppercase; }
+.hero { border:1px solid #2b4359; border-radius:24px; padding:30px 34px; background:linear-gradient(115deg,#142a3f,#11162b); box-shadow:0 14px 38px #0005; margin:8px 0 26px; }
+.hero h1 { margin:.3rem 0 .5rem; font-size:2.35rem; }
+.hero p { color:#a9bfd2; margin:0; }
+div[data-testid="stMetric"] { background:linear-gradient(145deg,#14263a,#101827); border:1px solid #2b4055; padding:18px 20px; border-radius:18px; }
+div[data-testid="stMetricLabel"] { color:#a3b8c9; }
+div[data-testid="stMetricValue"] { color:#f2f8ff; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+div[data-testid="stForm"], div[data-testid="stExpander"] { background:#101b2bcc; border:1px solid #293d53; border-radius:18px; }
+div[data-testid="stForm"] { padding:22px; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { background:#101827; }
+[data-baseweb="input"] > div, [data-baseweb="select"] > div, [data-baseweb="textarea"] { background:#172438; color:#f2f8ff; }
+input, textarea { color:#f2f8ff !important; }
+[data-testid="stWidgetLabel"], [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] { color:#c5d4e2; }
+div.stButton > button[kind="primaryFormSubmit"], div.stButton > button[kind="primary"] { background:linear-gradient(100deg,#27c9bd,#8d7bf5); border:0; color:#07111f; font-weight:700; border-radius:12px; }
+div.stButton > button[kind="secondary"] { background:#172438; border:1px solid #344b63; color:#e7eff8; border-radius:12px; }
+hr { border-color:#293d53; }
+</style>
+"""
+st.markdown(DARK_CSS if appearance == "Dark" else LIGHT_CSS, unsafe_allow_html=True)
 
 profiles = {} if PUBLIC_DEMO else load_profiles()
-st.sidebar.markdown('<div class="eyebrow">FINSIGHT / PERSONAL OS</div>', unsafe_allow_html=True)
-st.sidebar.title("◈ Your space")
 if PUBLIC_DEMO:
     mode = "Anonymous"
-    st.sidebar.caption("Public demo: anonymous session only. Do not enter real or sensitive financial information; entries are not saved to a profile file.")
+    st.sidebar.caption("Public demo: anonymous session only. Entries stay temporary to protect visitors’ privacy. Saved profiles are available when running the app on your own computer, not on this shared public version.")
     if st.sidebar.button("Clear my session data", use_container_width=True):
         run_count = st.session_state.get("agent_run_count", 0)
         for key in list(st.session_state.keys()):
