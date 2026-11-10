@@ -136,22 +136,27 @@ def parse_receipt(text, currency_code="USD"):
 
 st.markdown("""
 <style>
-.stApp { background: radial-gradient(ellipse at 70% -15%, #17315a 0%, #0a1221 42%, #070b13 100%); }
-[data-testid="stHeader"] { background:transparent; }
-[data-testid="stSidebar"] { background:linear-gradient(180deg,#101a2a,#0b111d); border-right:1px solid #25364b; }
+.stApp { background:#f3f6fb; color:#172033; }
+[data-testid="stHeader"] { background:rgba(243,246,251,.96); }
+[data-testid="stSidebar"] { background:#ffffff; border-right:1px solid #dce4ee; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] { color:#263449; }
 .block-container { padding-top:2rem; max-width:1440px; }
 html, body, [class*="css"] { font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-h1,h2,h3 { letter-spacing:-.04em; }
-.eyebrow { color:#53f1df; font:500 12px 'DM Mono',monospace; letter-spacing:.18em; text-transform:uppercase; }
-.hero { border:1px solid #2b4359; border-radius:24px; padding:30px 34px; background:linear-gradient(115deg,rgba(20,42,63,.94),rgba(17,22,43,.88)); box-shadow:0 18px 60px #0005; margin:8px 0 26px; }
+h1,h2,h3,h4 { color:#172033; letter-spacing:-.035em; }
+.eyebrow { color:#087e78; font:600 12px 'DM Mono',monospace; letter-spacing:.16em; text-transform:uppercase; }
+.hero { border:1px solid #dce5ef; border-radius:24px; padding:30px 34px; background:linear-gradient(115deg,#ffffff,#f8fbff); box-shadow:0 14px 38px #1c355010; margin:8px 0 26px; }
 .hero h1 { margin:.3rem 0 .5rem; font-size:2.35rem; }
-.hero p { color:#a9bfd2; margin:0; }
-div[data-testid="stMetric"] { background:linear-gradient(145deg,#14263a,#101827); border:1px solid #2b4055; padding:18px 20px; border-radius:18px; }
-div[data-testid="stMetricLabel"] { color:#a3b8c9; }
-div[data-testid="stMetricValue"] { color:#f2f8ff; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-div[data-testid="stForm"] { background:rgba(16,27,43,.76); border:1px solid #293d53; padding:22px; border-radius:20px; }
-div.stButton > button[kind="primaryFormSubmit"], div.stButton > button[kind="primary"] { background:linear-gradient(90deg,#27c9bd,#8d7bf5); border:0; color:#06121b; font-weight:700; border-radius:12px; }
-hr { border-color:#27384a; }
+.hero p { color:#526176; margin:0; }
+div[data-testid="stMetric"] { background:#ffffff; border:1px solid #dce5ef; padding:18px 20px; border-radius:18px; box-shadow:0 5px 18px #1c355008; }
+div[data-testid="stMetricLabel"] { color:#526176; }
+div[data-testid="stMetricValue"] { color:#172033; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+div[data-testid="stForm"] { background:#ffffff; border:1px solid #dce5ef; padding:22px; border-radius:20px; }
+div[data-testid="stExpander"] { background:#ffffff; border:1px solid #dce5ef; border-radius:14px; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { background:#ffffff; }
+[data-baseweb="input"] > div, [data-baseweb="select"] > div, [data-baseweb="textarea"] { background:#ffffff; }
+div.stButton > button[kind="primaryFormSubmit"], div.stButton > button[kind="primary"] { background:#087e78; border:0; color:#ffffff; font-weight:700; border-radius:12px; }
+div.stButton > button[kind="secondary"] { background:#ffffff; border:1px solid #cbd5e1; color:#263449; border-radius:12px; }
+hr { border-color:#dce5ef; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -315,10 +320,10 @@ with overview_tab:
             chart_data = nonzero.rename(columns={"Category": "category", "Monthly amount ($)": "amount"})
             st.vega_lite_chart(chart_data, {
                 "width": "container", "height": 280,
-                "mark": {"type": "arc", "innerRadius": 70, "stroke": "#0b1220", "strokeWidth": 3},
+                "mark": {"type": "arc", "innerRadius": 70, "stroke": "#ffffff", "strokeWidth": 3},
                 "encoding": {
                     "theta": {"field": "amount", "type": "quantitative"},
-                    "color": {"field": "category", "type": "nominal", "scale": {"scheme": "turbo"}, "legend": {"title": "Expense category", "labelColor": "#c5d4e2", "titleColor": "#c5d4e2"}},
+                    "color": {"field": "category", "type": "nominal", "scale": {"scheme": "tableau10"}, "legend": {"title": "Expense category", "labelColor": "#344256", "titleColor": "#172033"}},
                     "tooltip": [{"field": "category", "title": "Category"}, {"field": "amount", "title": f"Monthly spend ({currency_code})", "format": ",.2f"}],
                 }, "view": {"stroke": None}, "background": "transparent",
             }, use_container_width=True)
