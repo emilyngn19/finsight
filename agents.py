@@ -110,6 +110,7 @@ class GoalAgent:
                 eligible.append({
                     "goal_index": goal_index,
                     "goal": str(goal.get("Goal", "Savings goal")),
+                    "priority": goal.get("Priority", "Medium") if goal.get("Priority") in {"High", "Medium", "Low"} else "Medium",
                     "target": target,
                     "saved": current,
                     "remaining": remaining,
@@ -117,31 +118,51 @@ class GoalAgent:
                     "requested": requested,
                 })
 
-        allocations = [min(item["requested"], item["adjusted_remaining"]) for item in eligible]
-        requested_total = sum(allocations)
-        if requested_total > goal_budget and requested_total > 0:
-            allocations = [value * goal_budget / requested_total for value in allocations]
-        else:
-            extra = max(0.0, goal_budget - requested_total)
-            # Honor each goal's requested contribution first, then spread the
-            # remaining surplus by the size of each unfinished goal.
-            for _ in range(len(eligible) + 1):
-                if extra <= 0.005:
+        priority_order = ("High", "Medium", "Low")
+        allocations = [0.0 for _ in eligible]
+        remaining_budget = goal_budget
+
+        # First honor the user's requested contributions, using priority order
+        # if the available monthly amount cannot cover all preferences.
+        for priority in priority_order:
+            indices = [i for i, item in enumerate(eligible) if item["priority"] == priority]
+            requested = [min(eligible[i]["requested"], eligible[i]["adjusted_remaining"]) for i in indices]
+            requested_total = sum(requested)
+            if requested_total <= 0 or remaining_budget <= 0:
+                continue
+            scale = min(1.0, remaining_budget / requested_total)
+            for i, requested_amount in zip(indices, requested):
+                allocations[i] = requested_amount * scale
+            remaining_budget = max(0.0, remaining_budget - min(requested_total, remaining_budget))
+
+        # Then direct extra money to the highest-priority unfinished goals,
+        # sharing within each priority by the remaining target amounts.
+        for priority in priority_order:
+            if remaining_budget <= 0.005:
+                break
+            indices = [
+                i for i, item in enumerate(eligible)
+                if item["priority"] == priority
+                and item["adjusted_remaining"] - allocations[i] > 0.005
+            ]
+            for _ in range(len(indices) + 1):
+                if remaining_budget <= 0.005 or not indices:
                     break
-                open_goals = [
-                    i for i, item in enumerate(eligible)
-                    if item["adjusted_remaining"] - allocations[i] > 0.005
-                ]
-                if not open_goals:
+                weight_total = sum(eligible[i]["adjusted_remaining"] - allocations[i] for i in indices)
+                if weight_total <= 0.005:
                     break
-                weight_total = sum(eligible[i]["adjusted_remaining"] for i in open_goals)
                 distributed = 0.0
-                for i in open_goals:
-                    share = extra * eligible[i]["adjusted_remaining"] / weight_total
-                    addition = min(share, eligible[i]["adjusted_remaining"] - allocations[i])
+                for i in indices:
+                    remaining_goal = eligible[i]["adjusted_remaining"] - allocations[i]
+                    share = remaining_budget * remaining_goal / weight_total
+                    addition = min(share, remaining_goal)
                     allocations[i] += addition
                     distributed += addition
-                extra -= distributed
+                remaining_budget -= distributed
+                indices = [
+                    i for i in indices
+                    if eligible[i]["adjusted_remaining"] - allocations[i] > 0.005
+                ]
                 if distributed <= 0.005:
                     break
 
@@ -151,6 +172,7 @@ class GoalAgent:
             results.append({
                 "goal_index": item["goal_index"],
                 "goal": item["goal"],
+                "priority": item["priority"],
                 "target": item["target"],
                 "saved": item["saved"],
                 "remaining": item["remaining"],

@@ -44,8 +44,8 @@ DEFAULT_EXPENSES = pd.DataFrame([
     {"Category": "Other", "Type": "Variable", "Monthly amount ($)": 0.0},
 ])
 DEFAULT_GOALS = pd.DataFrame([
-    {"Goal": "Emergency fund", "Target ($)": 5000.0, "Saved so far ($)": 0.0, "Monthly contribution ($)": 0.0},
-    {"Goal": "Other goal", "Target ($)": 0.0, "Saved so far ($)": 0.0, "Monthly contribution ($)": 0.0},
+    {"Goal": "Emergency fund", "Priority": "High", "Target ($)": 5000.0, "Saved so far ($)": 0.0, "Monthly contribution ($)": 0.0},
+    {"Goal": "Other goal", "Priority": "Medium", "Target ($)": 0.0, "Saved so far ($)": 0.0, "Monthly contribution ($)": 0.0},
 ])
 
 def load_profiles():
@@ -351,6 +351,13 @@ with overview_tab:
     goal_df = pd.DataFrame(saved_goals) if saved_goals else DEFAULT_GOALS.copy()
     if "Goal" not in goal_df:
         goal_df = DEFAULT_GOALS.copy()
+    if "Priority" not in goal_df:
+        goal_df["Priority"] = "Medium"
+        emergency_rows = goal_df["Goal"].astype(str).str.contains("emergency", case=False, na=False)
+        goal_df.loc[emergency_rows, "Priority"] = "High"
+    else:
+        goal_df["Priority"] = goal_df["Priority"].fillna("Medium").astype(str)
+        goal_df.loc[~goal_df["Priority"].isin(["High", "Medium", "Low"]), "Priority"] = "Medium"
 
     with st.form("monthly_snapshot", clear_on_submit=False):
         income_col, savings_col = st.columns(2)
@@ -367,10 +374,12 @@ with overview_tab:
             }, key=f"expenses_{active_key or 'anonymous'}",
         )
         st.markdown("**Savings goals**")
+        st.caption("Set each goal's priority. After required expenses, extra suggested savings go to High priority goals first, then Medium, then Low.")
         edited_goals = st.data_editor(
             goal_df, num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={
                 "Goal": st.column_config.TextColumn("Goal", required=True),
+                "Priority": st.column_config.SelectboxColumn("Priority", options=["High", "Medium", "Low"], required=True),
                 "Target ($)": st.column_config.NumberColumn(f"Target ({currency_code})", min_value=0, step=100, format="%.2f"),
                 "Saved so far ($)": st.column_config.NumberColumn(f"Saved so far ({currency_code})", min_value=0, step=100, format="%.2f"),
                 "Monthly contribution ($)": st.column_config.NumberColumn(f"Monthly contribution ({currency_code})", min_value=0, step=25, format="%.2f"),
@@ -381,7 +390,10 @@ with overview_tab:
 
     if submitted:
         expenses_records = edited_expenses.fillna({"Category": "Other", "Type": "Variable", "Monthly amount ($)": 0}).to_dict(orient="records")
-        goals_records = edited_goals.fillna({"Goal": "Savings goal", "Target ($)": 0, "Saved so far ($)": 0, "Monthly contribution ($)": 0}).to_dict(orient="records")
+        goals_records = edited_goals.fillna({"Goal": "Savings goal", "Priority": "Medium", "Target ($)": 0, "Saved so far ($)": 0, "Monthly contribution ($)": 0}).to_dict(orient="records")
+        for goal in goals_records:
+            if goal.get("Priority") not in {"High", "Medium", "Low"}:
+                goal["Priority"] = "High" if "emergency" in str(goal.get("Goal", "")).casefold() else "Medium"
         profile_data.update({"income": income, "savings": savings, "expenses": expenses_records, "goals": goals_records})
         if active_key:
             profiles[active_key] = profile_data
@@ -656,10 +668,12 @@ with activity_tab:
 
     current_month = date.today().strftime("%Y-%m")
     current_month_transaction_total = 0.0
+    current_month_transaction_count = 0
     for tx in transactions:
         try:
             if datetime.strptime(str(tx.get("Date", "")), "%Y-%m-%d").strftime("%Y-%m") == current_month:
                 current_month_transaction_total += max(0.0, float(tx.get("Amount ($)", 0) or 0))
+                current_month_transaction_count += 1
         except (TypeError, ValueError):
             continue
     tracking_complete = st.checkbox(
@@ -680,7 +694,7 @@ with activity_tab:
             st.session_state["finsight_profile_data"] = profile_data
         else:
             st.session_state["finsight_anonymous_data"] = profile_data
-    if profile_data.get("expense_tracking_complete_month") == current_month and tracking_complete:
+    if profile_data.get("expense_tracking_complete_month") == current_month and tracking_complete and current_month_transaction_count > 0:
         goal_available_surplus = income - current_month_transaction_total
         goal_surplus_basis = "actual spending entered for this month"
         unspent_budget_amount = total_expenses - current_month_transaction_total
@@ -688,7 +702,9 @@ with activity_tab:
     else:
         goal_available_surplus = monthly_surplus
         goal_surplus_basis = "your monthly budget snapshot"
-        if monthly_surplus > 0:
+        if profile_data.get("expense_tracking_complete_month") == current_month and tracking_complete and current_month_transaction_count == 0:
+            st.caption("No current-month transactions are recorded, so savings suggestions still use your planned budget surplus. Add actual expenses before using actual-spending suggestions.")
+        elif monthly_surplus > 0:
             st.caption(f"Savings suggestions will use your planned monthly surplus of {money(monthly_surplus)}. Confirm the checkbox above after entering this month’s expenses to include any underspent budget.")
     if transactions:
         st.dataframe(pd.DataFrame(transactions).rename(columns={"Amount ($)": f"Amount ({currency_code})"}).sort_values("Date", ascending=False), hide_index=True, use_container_width=True)
@@ -731,6 +747,42 @@ with activity_tab:
             with actual_cols[1]:
                 st.markdown(f"**This month by category ({currency_code})**")
                 st.bar_chart(by_category, color="#53f1df", horizontal=True)
+        if tracking_complete and current_month_transaction_count > 0:
+            flexible_budget = expense_df.loc[expense_df["Type"] == "Variable"].groupby("Category")["Monthly amount ($)"].sum()
+            flexible_actual = actual_month.groupby("Category")["Amount ($)"].sum()
+            flex_rows = []
+            potential_flex_reduction = 0.0
+            for category, budget_amount in flexible_budget.items():
+                actual_amount = float(flexible_actual.get(category, 0.0))
+                variance = float(budget_amount) - actual_amount
+                if variance > 0.005 and actual_amount > 0:
+                    potential_flex_reduction += variance
+                    suggestion = f"If this month was typical, consider a next-month cap of {money(actual_amount)}; about {money(variance)} could go toward a goal."
+                elif variance > 0.005:
+                    suggestion = "No spend recorded; check for missing or seasonal costs before lowering this budget."
+                elif variance < -0.005:
+                    suggestion = f"Over the current cap by {money(abs(variance))}; reduce next month by about this amount to return to budget."
+                else:
+                    suggestion = "At the current budget."
+                flex_rows.append({
+                    "Flexible category": category,
+                    f"Budget ({currency_code})": money(float(budget_amount)),
+                    f"Actual ({currency_code})": money(actual_amount),
+                    "Suggestion": suggestion,
+                })
+            if flex_rows:
+                st.markdown("#### Flexible spending suggestions")
+                st.caption(
+                    "Underspending may leave money for goals; overspending creates no leftover and needs a plan to return to budget. "
+                    "These suggestions use the completed month's transactions. Lower spending only where it fits your needs; one month may be unusual. "
+                    "Actual month-end money left is already used in the savings-goal suggestions below, so this estimate is not added a second time."
+                )
+                st.dataframe(pd.DataFrame(flex_rows), hide_index=True, use_container_width=True)
+                if potential_flex_reduction > 0.005:
+                    st.info(
+                        f"Potential recurring reduction from under-budget categories with recorded spending: {money(potential_flex_reduction)} per month. "
+                        "Choose the goal priority in your snapshot; the suggested contributions will follow that order."
+                    )
         monthly_actuals = transaction_df.groupby("Month", as_index=False)["Amount ($)"].sum().sort_values("Month")
         if len(monthly_actuals) > 1:
             st.markdown("**Transaction spend by month**")
@@ -863,9 +915,11 @@ with agents_tab:
         if emergency_goal:
             emergency_goal["Target ($)"] = emergency_reserve_target
             emergency_goal["Saved so far ($)"] = min(current_savings_for_reserve, emergency_reserve_target)
+            emergency_goal.setdefault("Priority", "High")
         elif emergency_reserve_target > 0:
             saved_goals.append({
                 "Goal": "Emergency fund",
+                "Priority": "High",
                 "Target ($)": emergency_reserve_target,
                 "Saved so far ($)": min(current_savings_for_reserve, emergency_reserve_target),
                 "Monthly contribution ($)": 0.0,
@@ -963,6 +1017,7 @@ with agents_tab:
                 ):
                     saved_goals.append({
                         "Goal": goal_name,
+                        "Priority": "Medium",
                         "Target ($)": amount,
                         "Saved so far ($)": 0.0,
                         "Monthly contribution ($)": 0.0,
@@ -1001,7 +1056,7 @@ with agents_tab:
             st.caption("Your existing monthly contribution entries are treated as preferences. Any extra is split across unfinished goals based on their remaining target amounts; amounts beyond completed goals are directed to general savings.")
             if goal_results:
                 goal_view = pd.DataFrame(goal_results).rename(columns={
-                    "goal": "Goal", "target": f"Target ({currency_code})",
+                    "goal": "Goal", "priority": "Priority", "target": f"Target ({currency_code})",
                     "saved": f"Saved so far ({currency_code})", "remaining": f"Current gap ({currency_code})",
                     "requested_monthly_contribution": f"Your contribution preference ({currency_code})",
                     "suggested_monthly_contribution": f"Suggested monthly contribution ({currency_code})",
