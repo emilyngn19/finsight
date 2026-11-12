@@ -665,7 +665,7 @@ with activity_tab:
         "This month is complete, and I’ve entered all its expenses",
         value=profile_data.get("expense_tracking_complete_month") == current_month,
         key=f"all_expenses_logged_{profile_scope}_{current_month}",
-        help="Check this at the end of the month, after every expense transaction is entered here. The Goal Agent can then use actual spending instead of assuming you used every budgeted dollar.",
+        help="Check this at the end of the month after entering all expenses. Savings suggestions can then use actual spending instead of assuming you used every budgeted dollar.",
     )
     previous_tracking_month = profile_data.get("expense_tracking_complete_month")
     if tracking_complete:
@@ -688,7 +688,7 @@ with activity_tab:
         goal_available_surplus = monthly_surplus
         goal_surplus_basis = "your monthly budget snapshot"
         if monthly_surplus > 0:
-            st.caption(f"The Goal Agent will use your planned monthly surplus of {money(monthly_surplus)}. Confirm the checkbox above after all this month’s expenses are entered to include any underspent budget.")
+            st.caption(f"Savings suggestions will use your planned monthly surplus of {money(monthly_surplus)}. Confirm the checkbox above after entering this month’s expenses to include any underspent budget.")
     if transactions:
         st.dataframe(pd.DataFrame(transactions).rename(columns={"Amount ($)": f"Amount ({currency_code})"}).sort_values("Date", ascending=False), hide_index=True, use_container_width=True)
         transaction_df = pd.DataFrame(transactions)
@@ -736,7 +736,7 @@ with activity_tab:
             monthly_actuals = monthly_actuals.rename(columns={"Amount ($)": f"Amount ({currency_code})"})
             st.line_chart(monthly_actuals.set_index("Month"), y=f"Amount ({currency_code})", color="#a78bfa")
     else:
-        st.info("Add a few transactions to let the Spending Analysis Agent identify recent patterns.")
+        st.info("Add a few transactions to see recent spending patterns here.")
 
     st.divider()
     st.markdown('<div class="eyebrow">RECEIPT SCAN / LOCAL OCR</div>', unsafe_allow_html=True)
@@ -813,9 +813,9 @@ with activity_tab:
 
 with agents_tab:
     st.divider()
-    st.markdown('<div class="eyebrow">AGENT WORKFLOW / DECISION SUPPORT</div>', unsafe_allow_html=True)
-    st.subheader("07 / Ask your agent team")
-    st.caption("The Planner routes your question. Specialist agents calculate budget and goal impacts, review entered transactions, and compare alternatives; the Judge checks arithmetic, then the Coach explains the results. These are separate rule-based Python agents in this prototype, not calls to an external AI service.")
+    st.markdown('<div class="eyebrow">DECISION SUPPORT</div>', unsafe_allow_html=True)
+    st.subheader("07 / Explore a financial decision")
+    st.caption("Review how a purchase or new monthly cost could affect your budget, savings goals, and spending plan.")
     with st.form("agent_analysis"):
         decision_description = st.text_input("What decision are you considering?", placeholder="e.g. Buy a laptop, take a trip, or add a monthly subscription")
         decision_cols = st.columns(2)
@@ -825,7 +825,7 @@ with agents_tab:
             decision_kind = st.radio("Cost type", ["One-time", "Monthly recurring"], horizontal=True)
         run_limit_reached = PUBLIC_DEMO and st.session_state["agent_run_count"] >= MAX_AGENT_RUNS_PER_SESSION
         run_agents = st.form_submit_button(
-            "Run the agent team", type="primary", use_container_width=True, disabled=run_limit_reached
+            "Analyze this decision", type="primary", use_container_width=True, disabled=run_limit_reached
         )
     if PUBLIC_DEMO:
         st.caption(f"Public demo limit: {st.session_state['agent_run_count']} of {MAX_AGENT_RUNS_PER_SESSION} agent runs used in this session.")
@@ -843,46 +843,21 @@ with agents_tab:
     agent_output = st.session_state.get("agent_results")
     if agent_output:
         findings = agent_output["findings"]
-        st.markdown("#### Planner Agent routing")
-        st.write(" → ".join(agent_output["plan"]) + " → " + findings["judge"]["name"] + " → " + findings["coach"]["name"])
-        st.markdown("#### Coach Agent summary")
+        st.markdown("#### Your decision summary")
         st.info(findings["coach"]["summary"])
-        st.markdown("#### Specialist results")
         budget_result = findings["budget"]
-        execution = budget_result["execution"]
-        with st.expander("Budget Agent execution trace and stop condition", expanded=True):
-            st.write(
-                "Stop when the Judge passes the budget checks. If a check fails, allow one recalculation; "
-                f"stop after a maximum of {execution['max_attempts']} complete budget attempts. "
-                f"Each attempt has a hard limit of {execution['max_tool_calls_per_attempt']} calculation-tool calls "
-                f"({execution['max_attempts'] * execution['max_tool_calls_per_attempt']} calls maximum across the run)."
-            )
-            st.caption(
-                f"Stopped after {execution['attempt_count']} of {execution['max_attempts']} budget attempts: "
-                "Judge checks passed."
-                if execution["stop_reason"] == "judge_passed"
-                else f"Stopped after the maximum of {execution['attempt_count']} attempts; Judge checks still need review."
-            )
-            for attempt in execution["attempts"]:
-                st.markdown(f"**Attempt {attempt['attempt']} — Judge: {attempt['judge_status']}**")
-                st.caption(" · ".join(
-                    f"{'✓' if passed else '⚠'} {label}"
-                    for label, passed in attempt["checks"].items()
-                ))
-                for call_number, call in enumerate(attempt["tool_calls"], start=1):
-                    st.write(f"{call_number}. `{call['tool']}` → {call['observation']}")
         budget_cols = st.columns(5)
-        budget_cols[0].metric("Current monthly surplus", money(budget_result["current_surplus"]))
+        budget_cols[0].metric("Monthly surplus", money(budget_result["current_surplus"]))
         budget_cols[1].metric("Monthly expenses", money(budget_result["monthly_expenses"]))
-        budget_cols[2].metric("After recurring decision", money(budget_result["projected_monthly_surplus"]))
-        budget_cols[3].metric("Savings after one-time cost", money(budget_result["projected_savings_after_decision"]))
+        budget_cols[2].metric("After new monthly cost", money(budget_result["projected_monthly_surplus"]))
+        budget_cols[3].metric("Savings after purchase", money(budget_result["projected_savings_after_decision"]))
         runway = budget_result["projected_runway_months"]
         runway_label = f"{runway:.1f} months" if runway is not None else "No shortfall"
         budget_cols[4].metric("Savings runway", runway_label)
 
         goal_summary = findings["goals"]
         goal_results = goal_summary["goals"]
-        with st.expander("Goal Agent", expanded=True):
+        with st.expander("Savings goal suggestions", expanded=True):
             st.info(
                 f"Using {goal_surplus_basis}, {money(goal_summary['available_surplus'])} is available after this decision. "
                 f"Suggested for your active goals: {money(goal_summary['allocated_to_goals'])} per month; "
@@ -917,29 +892,19 @@ with agents_tab:
             else:
                 st.write("No unfinished goal with a target amount is entered. The available amount is suggested for general savings.")
 
-        with st.expander("Spending Analysis Agent", expanded=True):
+        with st.expander("Your spending patterns", expanded=True):
             spending_result = findings["spending"]
             st.write(spending_result["message"])
             if spending_result["categories"]:
                 st.dataframe(pd.DataFrame(spending_result["categories"]).rename(columns={"category": "Category", "amount": f"90-day total ({currency_code})"}), hide_index=True, use_container_width=True)
 
         if "what_if" in findings:
-            with st.expander("What-if Agent comparison", expanded=True):
+            with st.expander("Compare alternatives", expanded=True):
                 st.write(findings["what_if"]["metric"])
                 scenario_view = pd.DataFrame(findings["what_if"]["scenarios"])
                 scenario_view["amount"] = scenario_view["amount"].map(money)
                 st.dataframe(scenario_view.rename(columns={"scenario": "Alternative", "amount": f"{findings['what_if']['metric']} ({currency_code})"}), hide_index=True, use_container_width=True)
                 st.caption(findings["what_if"]["recommendation"])
-
-        with st.expander("Judge Agent review", expanded=True):
-            review = findings["judge"]
-            if review.get("affordability") == "Not affordable":
-                st.warning(review["summary"])
-            elif review["status"] == "Reviewed":
-                st.success(review["summary"])
-            else:
-                st.warning(review["summary"])
-            st.write(" · ".join(f"{'✓' if passed else '⚠'} {label}" for label, passed in review["checks"].items()))
 
 st.markdown("---")
 if PUBLIC_DEMO:
