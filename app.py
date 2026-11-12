@@ -85,9 +85,9 @@ def get_fred_api_key():
 @st.cache_data(ttl=24 * 60 * 60)
 def fetch_latest_inflation(api_key):
     """Fetch the latest year-over-year U.S. CPI inflation rate from FRED."""
-    # Fetch a wide window so the calculation has both the newest CPI value and
-    # the value for the same month one year earlier, even if a recent value is missing.
-    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 36})
+    # Fetch a wide window so the newest valid transformed value is available
+    # even when FRED has not published the most recent month's CPI yet.
+    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "units": "pc1", "sort_order": "desc", "limit": 36})
     request_url = f"https://api.stlouisfed.org/fred/series/observations?{query}"
     try:
         with urlopen(request_url, timeout=10) as response:
@@ -105,18 +105,12 @@ def fetch_latest_inflation(api_key):
     for item in payload.get("observations", []):
         try:
             value = float(item.get("value"))
-            year, month, _ = (int(part) for part in item["date"].split("-"))
-            observations.append({"value": value, "date": item["date"], "year": year, "month": month})
+            observations.append({"value": value, "date": item["date"]})
         except (TypeError, ValueError, KeyError):
             continue
     if not observations:
-        raise ValueError("FRED returned no numeric CPI observations. Check the FRED_API_KEY in Streamlit Secrets and try again.")
-    latest = observations[0]
-    prior_year = next((item for item in observations if item["year"] == latest["year"] - 1 and item["month"] == latest["month"]), None)
-    if prior_year is None or prior_year["value"] <= 0:
-        raise ValueError("FRED did not return the same-month CPI value from last year, so inflation could not be calculated.")
-    rate = (latest["value"] / prior_year["value"] - 1) * 100
-    return {"rate": rate, "date": latest["date"]}
+        raise ValueError("FRED returned no numeric year-over-year CPI values. Check the FRED_API_KEY in Streamlit Secrets and try again.")
+    return {"rate": observations[0]["value"], "date": observations[0]["date"]}
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -783,18 +777,24 @@ with agents_tab:
         execution = budget_result["execution"]
         with st.expander("Budget Agent execution trace and stop condition", expanded=True):
             st.write(
-                "Stop when the monthly budget is calculated and, if there is a shortfall, "
-                "the applicable savings-runway estimate is complete. Hard limit: "
-                f"{execution['max_tool_calls']} tool calls."
+                "Stop when the Judge passes the budget checks. If a check fails, allow one recalculation; "
+                f"stop after a maximum of {execution['max_attempts']} complete budget attempts. "
+                f"Each attempt has a hard limit of {execution['max_tool_calls_per_attempt']} calculation-tool calls."
             )
             st.caption(
-                f"Stopped because the task completed after {execution['tool_call_count']} of "
-                f"{execution['max_tool_calls']} allowed tool calls."
-                if execution["stop_reason"] == "task_complete"
-                else f"Stopped at the hard limit of {execution['max_tool_calls']} tool calls."
+                f"Stopped after {execution['attempt_count']} of {execution['max_attempts']} budget attempts: "
+                "Judge checks passed."
+                if execution["stop_reason"] == "judge_passed"
+                else f"Stopped after the maximum of {execution['attempt_count']} attempts; Judge checks still need review."
             )
-            for call_number, call in enumerate(execution["tool_calls"], start=1):
-                st.write(f"{call_number}. `{call['tool']}` → {call['observation']}")
+            for attempt in execution["attempts"]:
+                st.markdown(f"**Attempt {attempt['attempt']} — Judge: {attempt['judge_status']}**")
+                st.caption(" · ".join(
+                    f"{'✓' if passed else '⚠'} {label}"
+                    for label, passed in attempt["checks"].items()
+                ))
+                for call_number, call in enumerate(attempt["tool_calls"], start=1):
+                    st.write(f"{call_number}. `{call['tool']}` → {call['observation']}")
         budget_cols = st.columns(5)
         budget_cols[0].metric("Current monthly surplus", money(budget_result["current_surplus"]))
         budget_cols[1].metric("Monthly expenses", money(budget_result["monthly_expenses"]))

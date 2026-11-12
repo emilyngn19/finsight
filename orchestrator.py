@@ -16,20 +16,47 @@ class PlannerAgent:
 
 
 class Orchestrator:
+    MAX_BUDGET_ATTEMPTS = 2
+
     def __init__(self):
         self.planner = PlannerAgent()
 
     def analyze(self, profile, decision, transactions, currency_symbol="$", available_surplus=None):
+        decision["currency_symbol"] = currency_symbol
         plan = self.planner.categorize(decision)
-        budget = budget_agent.analyze(profile, decision)
+        budget_attempts = []
+        for attempt_number in range(1, self.MAX_BUDGET_ATTEMPTS + 1):
+            budget = budget_agent.analyze(profile, decision)
+            check_findings = {"budget": budget}
+            if what_if_agent.name in plan:
+                check_findings["what_if"] = what_if_agent.compare(budget, decision)
+            review = judge_agent.review(profile, decision, check_findings)
+            budget_attempts.append({
+                "attempt": attempt_number,
+                "tool_calls": budget["execution"]["tool_calls"],
+                "judge_status": review["status"],
+                "checks": review["checks"],
+            })
+            if review["status"] == "Reviewed":
+                stop_reason = "judge_passed"
+                break
+            if attempt_number == self.MAX_BUDGET_ATTEMPTS:
+                stop_reason = "maximum_attempts_reached"
+
+        budget["execution"] = {
+            "max_attempts": self.MAX_BUDGET_ATTEMPTS,
+            "attempt_count": len(budget_attempts),
+            "attempts": budget_attempts,
+            "tool_call_count": sum(len(item["tool_calls"]) for item in budget_attempts),
+            "max_tool_calls_per_attempt": budget_agent.MAX_TOOL_CALLS,
+            "stop_reason": stop_reason,
+        }
         goals = goal_agent.analyze(profile, decision, available_surplus)
         spending = spending_analysis_agent.analyze(transactions, budget["monthly_expenses"], currency_symbol)
         findings = {"budget": budget, "goals": goals, "spending": spending}
         if what_if_agent.name in plan:
             findings["what_if"] = what_if_agent.compare(budget, decision)
-        review = judge_agent.review(profile, decision, findings)
         findings["judge"] = review
-        decision["currency_symbol"] = currency_symbol
         findings["coach"] = coach_agent.explain(decision, findings, review)
         return {"plan": plan, "findings": findings}
 
