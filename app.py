@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import tempfile
@@ -843,9 +844,87 @@ with agents_tab:
     agent_output = st.session_state.get("agent_results")
     if agent_output:
         findings = agent_output["findings"]
+        decision_data = st.session_state.get("agent_decision", {})
         st.markdown("#### Your decision summary")
-        st.info(findings["coach"]["summary"])
         budget_result = findings["budget"]
+        review = findings["judge"]
+        if review["status"] != "Reviewed":
+            st.warning("Some budget totals need review. Check your income and expense entries before relying on the result.")
+        elif review["affordability"] == "Not affordable":
+            st.error(review["assessment"])
+        elif review["affordability"] == "Tight":
+            st.warning(review["assessment"])
+        elif review["affordability"] == "Affordable":
+            st.success(review["assessment"])
+        st.info(findings["coach"]["summary"])
+
+        if review["affordability"] == "Not affordable":
+            amount = float(decision_data.get("amount", 0) or 0)
+            recurring = decision_data.get("kind") == "Monthly recurring"
+            current_surplus = float(budget_result["current_surplus"])
+            if amount > 0 and not recurring:
+                st.markdown("##### Options to make this purchase more manageable")
+                installment_rows = []
+                for months in (3, 6, 12):
+                    payment = amount / months
+                    remaining_after_payment = current_surplus - payment
+                    if current_surplus < 0:
+                        fit = "Does not fit: budget already has a shortfall"
+                    elif remaining_after_payment < -0.005:
+                        fit = "Exceeds current monthly surplus"
+                    elif remaining_after_payment <= 0.005:
+                        fit = "Fits exactly; leaves no monthly margin"
+                    else:
+                        fit = "Fits listed surplus"
+                    installment_rows.append({
+                        "Term": f"{months} months",
+                        f"Estimated payment ({currency_code}/month)": money(payment),
+                        f"Left after payment ({currency_code}/month)": money(remaining_after_payment),
+                        "Budget check": fit,
+                    })
+                st.dataframe(pd.DataFrame(installment_rows), hide_index=True, use_container_width=True)
+                st.caption("Illustration assumes equal payments at 0% interest with no fees. Actual financing may cost more; check the lender’s total repayment amount and terms.")
+                if current_surplus > 0:
+                    months_to_save = math.ceil(amount / current_surplus)
+                    st.write(
+                        f"If you keep your current savings untouched and direct your full monthly surplus of "
+                        f"{money(current_surplus)} to a separate purchase goal, it would take about "
+                        f"{months_to_save} month{'s' if months_to_save != 1 else ''} to save the full price."
+                    )
+                else:
+                    st.write("Your current budget has no positive monthly surplus to fund this goal yet. Consider lowering expenses or increasing income first.")
+
+                saved_goals = profile_data.setdefault("goals", [])
+                goal_name = (str(decision_data.get("description", "")).strip() or "Purchase fund")
+                existing_names = {str(goal.get("Goal", "")).strip().casefold() for goal in saved_goals}
+                goal_name_in_use = goal_name.casefold() in existing_names
+                if goal_name_in_use:
+                    st.caption("A savings goal with this name already exists. You can update its target in the savings goals section.")
+                if st.button(
+                    f"Add {goal_name} as a savings goal",
+                    type="secondary", key="add_decision_as_goal", disabled=goal_name_in_use,
+                    help="Adds a separate goal for the full purchase price and leaves current savings untouched.",
+                ):
+                    saved_goals.append({
+                        "Goal": goal_name,
+                        "Target ($)": amount,
+                        "Saved so far ($)": 0.0,
+                        "Monthly contribution ($)": 0.0,
+                    })
+                    if active_key:
+                        profiles[active_key] = profile_data
+                        save_profiles(profiles)
+                        st.session_state["finsight_profile_data"] = profile_data
+                    else:
+                        st.session_state["finsight_anonymous_data"] = profile_data
+                    st.session_state.pop("agent_results", None)
+                    st.rerun()
+            elif recurring:
+                st.caption(
+                    f"To avoid a monthly shortfall, keep a recurring payment at or below "
+                    f"{money(max(0.0, current_surplus))}; keeping it lower leaves some margin."
+                )
+
         budget_cols = st.columns(5)
         budget_cols[0].metric("Monthly surplus", money(budget_result["current_surplus"]))
         budget_cols[1].metric("Monthly expenses", money(budget_result["monthly_expenses"]))
