@@ -3,7 +3,6 @@ import os
 import re
 import tempfile
 from urllib.parse import urlencode
-from urllib.error import HTTPError
 from urllib.request import urlopen
 from pathlib import Path
 from datetime import date, datetime
@@ -76,41 +75,39 @@ def read_receipt_image(image_bytes, suffix):
     finally:
         os.unlink(image_path)
 
-def get_fred_api_key():
-    try:
-        return st.secrets.get("FRED_API_KEY") or os.getenv("FRED_API_KEY")
-    except Exception:
-        return os.getenv("FRED_API_KEY")
+@st.cache_data(ttl=7 * 24 * 60 * 60)
+def fetch_world_bank_countries():
+    """Load countries with ISO alpha-2 codes from the World Bank API."""
+    request_url = "https://api.worldbank.org/v2/country?format=json&per_page=400"
+    with urlopen(request_url, timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if len(payload) < 2 or not payload[1]:
+        raise ValueError("The World Bank country list was empty.")
+    countries = []
+    for item in payload[1]:
+        code = str(item.get("iso2Code", "")).strip()
+        region = item.get("region", {}).get("value", "")
+        if code and region != "Aggregates":
+            countries.append({"name": item["name"], "code": code.lower()})
+    return sorted(countries, key=lambda item: item["name"].casefold())
 
 @st.cache_data(ttl=24 * 60 * 60)
-def fetch_latest_inflation(api_key):
-    """Fetch the latest year-over-year U.S. CPI inflation rate from FRED."""
-    # Fetch a wide window so the newest valid transformed value is available
-    # even when FRED has not published the most recent month's CPI yet.
-    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "units": "pc1", "sort_order": "desc", "limit": 36})
-    request_url = f"https://api.stlouisfed.org/fred/series/observations?{query}"
-    try:
-        with urlopen(request_url, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        try:
-            error_payload = json.loads(exc.read().decode("utf-8"))
-            detail = error_payload.get("error_message", f"FRED returned HTTP {exc.code}.")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            detail = f"FRED returned HTTP {exc.code}."
-        raise ValueError(detail) from exc
-    if payload.get("error_code") or payload.get("error_message"):
-        raise ValueError(payload.get("error_message", "FRED rejected the request."))
-    observations = []
-    for item in payload.get("observations", []):
-        try:
-            value = float(item.get("value"))
-            observations.append({"value": value, "date": item["date"]})
-        except (TypeError, ValueError, KeyError):
-            continue
-    if not observations:
-        raise ValueError("FRED returned no numeric year-over-year CPI values. Check the FRED_API_KEY in Streamlit Secrets and try again.")
-    return {"rate": observations[0]["value"], "date": observations[0]["date"]}
+def fetch_latest_country_inflation(country_code):
+    """Fetch the latest available annual CPI inflation rate for one country."""
+    query = urlencode({"format": "json", "mrnev": 5, "per_page": 5})
+    request_url = (
+        f"https://api.worldbank.org/v2/country/{country_code}/indicator/"
+        f"FP.CPI.TOTL.ZG?{query}"
+    )
+    with urlopen(request_url, timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if len(payload) < 2 or not payload[1]:
+        raise ValueError("The World Bank API returned no inflation observations for this country.")
+    for observation in payload[1]:
+        value = observation.get("value")
+        if value is not None:
+            return {"rate": float(value), "year": str(observation["date"])}
+    raise ValueError("No reported annual inflation value is available for this country.")
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -414,21 +411,51 @@ with overview_tab:
         horizon = st.slider("Projection horizon", min_value=6, max_value=60, value=24, step=6, format="%d months")
         annual_return = st.slider("Assumed annual investment return", min_value=0.0, max_value=15.0, value=0.0, step=0.5, format="%.1f%%", help="A hypothetical nominal rate for illustration, not a promised return. Set to 0% to model saving without investment growth.")
         st.session_state.setdefault("annual_inflation", 3.0)
-        if st.button("Use latest inflation from free FRED API", key="fetch_fred_inflation"):
-            fred_key = get_fred_api_key()
-            if not fred_key:
-                st.info("Add your free FRED_API_KEY in Streamlit Secrets to fetch the current rate. You can keep using the manual assumption meanwhile.")
-            else:
+        try:
+            inflation_countries = fetch_world_bank_countries()
+        except Exception as exc:
+            inflation_countries = []
+            st.warning(f"Could not load the country list from the World Bank API: {exc}. The manual inflation input remains available.")
+        if inflation_countries:
+            country_names = [item["name"] for item in inflation_countries]
+            country_codes = {item["name"]: item["code"] for item in inflation_countries}
+            saved_inflation_country = profile_data.get("inflation_country", "United States")
+            if saved_inflation_country not in country_names:
+                saved_inflation_country = "United States" if "United States" in country_names else country_names[0]
+            inflation_country = st.selectbox(
+                "Country used for the inflation estimate", country_names,
+                index=country_names.index(saved_inflation_country),
+                key=f"inflation_country_{profile_scope}",
+            )
+            if profile_data.get("inflation_country") != inflation_country:
+                profile_data["inflation_country"] = inflation_country
+                if active_key:
+                    profiles[active_key] = profile_data
+                    save_profiles(profiles)
+                    st.session_state["finsight_profile_data"] = profile_data
+                else:
+                    st.session_state["finsight_anonymous_data"] = profile_data
+            if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
                 try:
-                    inflation_data = fetch_latest_inflation(fred_key)
-                    st.session_state["annual_inflation"] = round(float(inflation_data["rate"]) * 2) / 2
-                    st.session_state["fred_inflation_date"] = inflation_data["date"]
+                    inflation_data = fetch_latest_country_inflation(country_codes[inflation_country])
+                    st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
+                    st.session_state["country_inflation_year"] = inflation_data["year"]
+                    st.session_state["country_inflation_name"] = inflation_country
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Could not fetch FRED inflation data: {exc}")
-        annual_inflation = st.slider("Assumed annual inflation", min_value=0.0, max_value=15.0, step=0.5, format="%.1f%%", key="annual_inflation", help="Use the free FRED API for the latest U.S. CPI inflation rate, or adjust this planning assumption yourself.")
-        if st.session_state.get("fred_inflation_date"):
-            st.caption(f"FRED U.S. CPI year-over-year rate, latest observation: {st.session_state['fred_inflation_date']}. It is a U.S. benchmark and may not match your country or currency; you can adjust it.")
+                    st.error(f"Could not fetch inflation data for {inflation_country}: {exc}")
+        annual_inflation = st.number_input(
+            "Assumed annual inflation (%)", min_value=-50.0, max_value=10000.0,
+            step=0.1, format="%.1f", key="annual_inflation",
+            help="Load the latest available country rate from the free World Bank API, or enter your own estimate. Country data is annual and may lag current prices.",
+        )
+        if st.session_state.get("country_inflation_year"):
+            st.caption(
+                f"World Bank annual CPI rate for {st.session_state['country_inflation_name']}: "
+                f"{st.session_state['country_inflation_year']}. The published value may lag current prices; "
+                "you can edit the assumption above."
+            )
+        st.markdown("[World Bank inflation data source](https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG)")
         area_choices = ["Skip comparison", *BLS_AREA_ANNUAL_MEAN.keys(), "Other location (enter local average)"]
         saved_area = profile_data.get("benchmark_area", "Skip comparison")
         area_choice = st.selectbox(
@@ -779,7 +806,8 @@ with agents_tab:
             st.write(
                 "Stop when the Judge passes the budget checks. If a check fails, allow one recalculation; "
                 f"stop after a maximum of {execution['max_attempts']} complete budget attempts. "
-                f"Each attempt has a hard limit of {execution['max_tool_calls_per_attempt']} calculation-tool calls."
+                f"Each attempt has a hard limit of {execution['max_tool_calls_per_attempt']} calculation-tool calls "
+                f"({execution['max_attempts'] * execution['max_tool_calls_per_attempt']} calls maximum across the run)."
             )
             st.caption(
                 f"Stopped after {execution['attempt_count']} of {execution['max_attempts']} budget attempts: "
