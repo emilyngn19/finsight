@@ -85,9 +85,9 @@ def get_fred_api_key():
 @st.cache_data(ttl=24 * 60 * 60)
 def fetch_latest_inflation(api_key):
     """Fetch the latest year-over-year U.S. CPI inflation rate from FRED."""
-    # FRED's pc1 transformation returns the percent change from a year ago,
-    # so the app only needs the newest valid observation instead of 13 raw values.
-    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "units": "pc1", "sort_order": "desc", "limit": 1})
+    # Fetch a wide window so the calculation has both the newest CPI value and
+    # the value for the same month one year earlier, even if a recent value is missing.
+    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 36})
     request_url = f"https://api.stlouisfed.org/fred/series/observations?{query}"
     try:
         with urlopen(request_url, timeout=10) as response:
@@ -101,10 +101,22 @@ def fetch_latest_inflation(api_key):
         raise ValueError(detail) from exc
     if payload.get("error_code") or payload.get("error_message"):
         raise ValueError(payload.get("error_message", "FRED rejected the request."))
-    observations = [item for item in payload.get("observations", []) if item.get("value") not in (None, ".")]
+    observations = []
+    for item in payload.get("observations", []):
+        try:
+            value = float(item.get("value"))
+            year, month, _ = (int(part) for part in item["date"].split("-"))
+            observations.append({"value": value, "date": item["date"], "year": year, "month": month})
+        except (TypeError, ValueError, KeyError):
+            continue
     if not observations:
-        raise ValueError("FRED returned no current CPI inflation observation.")
-    return {"rate": float(observations[0]["value"]), "date": observations[0]["date"]}
+        raise ValueError("FRED returned no numeric CPI observations. Check the FRED_API_KEY in Streamlit Secrets and try again.")
+    latest = observations[0]
+    prior_year = next((item for item in observations if item["year"] == latest["year"] - 1 and item["month"] == latest["month"]), None)
+    if prior_year is None or prior_year["value"] <= 0:
+        raise ValueError("FRED did not return the same-month CPI value from last year, so inflation could not be calculated.")
+    rate = (latest["value"] / prior_year["value"] - 1) * 100
+    return {"rate": rate, "date": latest["date"]}
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
