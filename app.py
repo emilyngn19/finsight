@@ -2,6 +2,8 @@ import json
 import os
 import re
 import tempfile
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from pathlib import Path
 from datetime import date, datetime
 
@@ -72,6 +74,28 @@ def read_receipt_image(image_bytes, suffix):
         return "\n".join(str(item[1]) for item in (results or []) if len(item) > 1).strip()
     finally:
         os.unlink(image_path)
+
+def get_fred_api_key():
+    try:
+        return st.secrets.get("FRED_API_KEY") or os.getenv("FRED_API_KEY")
+    except Exception:
+        return os.getenv("FRED_API_KEY")
+
+@st.cache_data(ttl=24 * 60 * 60)
+def fetch_latest_inflation(api_key):
+    """Fetch the latest year-over-year U.S. CPI inflation rate from FRED."""
+    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 13})
+    request_url = f"https://api.stlouisfed.org/fred/series/observations?{query}"
+    with urlopen(request_url, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    observations = [item for item in payload.get("observations", []) if item.get("value") not in (None, ".")]
+    if len(observations) < 13:
+        raise ValueError("FRED returned fewer than 13 monthly CPI observations.")
+    latest = float(observations[0]["value"])
+    year_ago = float(observations[12]["value"])
+    if year_ago <= 0:
+        raise ValueError("FRED returned an invalid CPI baseline.")
+    return {"rate": (latest / year_ago - 1) * 100, "date": observations[0]["date"]}
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -374,7 +398,22 @@ with overview_tab:
         contribution = st.number_input(f"Monthly amount to save or invest ({currency_code})", min_value=0.0, value=float(max(0.0, monthly_surplus)), step=50.0, key="forecast_contribution")
         horizon = st.slider("Projection horizon", min_value=6, max_value=60, value=24, step=6, format="%d months")
         annual_return = st.slider("Assumed annual investment return", min_value=0.0, max_value=15.0, value=0.0, step=0.5, format="%.1f%%", help="A hypothetical nominal rate for illustration, not a promised return. Set to 0% to model saving without investment growth.")
-        annual_inflation = st.slider("Assumed annual inflation", min_value=0.0, max_value=15.0, value=3.0, step=0.5, format="%.1f%%", help="Planning assumption only. Adjust it to explore how rising prices could reduce future purchasing power.")
+        st.session_state.setdefault("annual_inflation", 3.0)
+        if st.button("Use latest inflation from free FRED API", key="fetch_fred_inflation"):
+            fred_key = get_fred_api_key()
+            if not fred_key:
+                st.info("Add your free FRED_API_KEY in Streamlit Secrets to fetch the current rate. You can keep using the manual assumption meanwhile.")
+            else:
+                try:
+                    inflation_data = fetch_latest_inflation(fred_key)
+                    st.session_state["annual_inflation"] = round(float(inflation_data["rate"]) * 2) / 2
+                    st.session_state["fred_inflation_date"] = inflation_data["date"]
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not fetch FRED inflation data: {exc}")
+        annual_inflation = st.slider("Assumed annual inflation", min_value=0.0, max_value=15.0, step=0.5, format="%.1f%%", key="annual_inflation", help="Use the free FRED API for the latest U.S. CPI inflation rate, or adjust this planning assumption yourself.")
+        if st.session_state.get("fred_inflation_date"):
+            st.caption(f"FRED U.S. CPI year-over-year rate, latest observation: {st.session_state['fred_inflation_date']}. It is a U.S. benchmark and may not match your country or currency; you can adjust it.")
         area_choices = ["Skip comparison", *BLS_AREA_ANNUAL_MEAN.keys(), "Other location (enter local average)"]
         saved_area = profile_data.get("benchmark_area", "Skip comparison")
         area_choice = st.selectbox(
@@ -612,70 +651,75 @@ with activity_tab:
     st.divider()
     st.markdown('<div class="eyebrow">RECEIPT SCAN / LOCAL OCR</div>', unsafe_allow_html=True)
     st.subheader("06 / Scan a receipt")
-    st.caption(f"Upload a JPG or PNG photo, or take one with your camera. Check the extracted total before saving; it is treated as {currency_code}, and receipt currency is not converted. The image is read locally and removed after reading.")
-    receipt_upload_col, receipt_camera_col = st.columns(2)
-    with receipt_upload_col:
-        receipt_upload = st.file_uploader("Upload receipt image", type=["jpg", "jpeg", "png"], key="receipt_upload")
-    with receipt_camera_col:
-        receipt_camera = st.camera_input("Take a receipt photo", key="receipt_camera")
-    receipt_image = receipt_camera or receipt_upload
-    if receipt_image:
-        st.image(receipt_image, caption="Receipt preview", width=360)
-        if st.button("Read receipt", type="primary", key="read_receipt"):
-            suffix = Path(receipt_image.name or "receipt.jpg").suffix.lower() or ".jpg"
-            try:
-                extracted_text = read_receipt_image(receipt_image.getvalue(), suffix)
-                st.session_state["receipt_draft"] = parse_receipt(extracted_text, currency_code)
-                if not extracted_text:
-                    st.warning("I couldn't read text from that photo. Try a clearer, well-lit picture with the full receipt in frame.")
-            except ImportError:
-                st.error("Receipt OCR is not installed in the Python environment running Streamlit. Stop the app, install the packages in requirements.txt, then restart it.")
-            except Exception as exc:
-                st.error(f"Could not read this receipt: {exc}")
+    use_receipt = st.checkbox("I want to add an expense using a receipt photo", key="use_receipt_photo")
+    if not use_receipt:
+        st.session_state.pop("receipt_draft", None)
+        st.caption("Receipt scanning is optional. Turn this on only when you want to upload or take a receipt photo.")
+    else:
+        st.caption(f"Upload a JPG or PNG photo, or take one with your camera. Check the extracted total before saving; it is treated as {currency_code}, and receipt currency is not converted. The image is read locally and removed after reading.")
+        receipt_upload_col, receipt_camera_col = st.columns(2)
+        with receipt_upload_col:
+            receipt_upload = st.file_uploader("Upload receipt image", type=["jpg", "jpeg", "png"], key="receipt_upload")
+        with receipt_camera_col:
+            receipt_camera = st.camera_input("Take a receipt photo", key="receipt_camera")
+        receipt_image = receipt_camera or receipt_upload
+        if receipt_image:
+            st.image(receipt_image, caption="Receipt preview", width=360)
+            if st.button("Read receipt", type="primary", key="read_receipt"):
+                suffix = Path(receipt_image.name or "receipt.jpg").suffix.lower() or ".jpg"
+                try:
+                    extracted_text = read_receipt_image(receipt_image.getvalue(), suffix)
+                    st.session_state["receipt_draft"] = parse_receipt(extracted_text, currency_code)
+                    if not extracted_text:
+                        st.warning("I couldn't read text from that photo. Try a clearer, well-lit picture with the full receipt in frame.")
+                except ImportError:
+                    st.error("Receipt OCR is not installed in the Python environment running Streamlit. Stop the app, install the packages in requirements.txt, then restart it.")
+                except Exception as exc:
+                    st.error(f"Could not read this receipt: {exc}")
 
-    receipt_draft = st.session_state.get("receipt_draft")
-    if receipt_draft:
-        with st.expander("Review extracted receipt details", expanded=True):
-            if receipt_draft.get("amount") is None:
-                st.warning("I couldn't confidently find the receipt total. Enter the total below before adding it.")
-            if not receipt_draft.get("date_was_read"):
-                st.caption("No clear date was detected, so today's date was filled in. You can change it below.")
-            if receipt_draft.get("text"):
-                with st.expander("Show OCR text"):
-                    st.text(receipt_draft["text"])
-            with st.form("apply_receipt"):
-                receipt_cols = st.columns(3)
-                with receipt_cols[0]:
-                    detected_amount = receipt_draft.get("amount")
-                    amount_source = st.radio(
-                        "Receipt amount",
-                        ["Check / correct detected amount", "Enter amount manually"],
-                        horizontal=False,
-                        help="Receipt scanning can misread totals. Always check this value before adding it.",
-                    )
-                    amount_default = float(detected_amount or 0) if amount_source.startswith("Check") else 0.0
-                    receipt_amount = st.number_input(
-                        f"Confirm the amount to record ({currency_code})", min_value=0.0,
-                        value=amount_default, step=0.01, format="%.2f",
-                        help="Edit this number if the scanned total is wrong. The amount you confirm is what gets recorded.",
-                    )
-                with receipt_cols[1]:
-                    receipt_date = st.date_input("Receipt date", value=receipt_draft["date"])
-                with receipt_cols[2]:
-                    receipt_category = st.selectbox("Category", sorted(set(transaction_categories + [receipt_draft["category"]])), index=sorted(set(transaction_categories + [receipt_draft["category"]])).index(receipt_draft["category"]))
-                receipt_merchant = st.text_input("Merchant", value=receipt_draft["merchant"])
-                apply_receipt = st.form_submit_button("Add receipt to expenses", type="primary", use_container_width=True)
-            if apply_receipt:
-                transactions.append({"Date": receipt_date.strftime("%Y-%m-%d"), "Category": receipt_category, "Amount ($)": float(receipt_amount), "Note": f"Receipt · {receipt_merchant.strip()}"})
-                profile_data["transactions"] = transactions
-                if active_key:
-                    profiles[active_key] = profile_data
-                    save_profiles(profiles)
-                else:
-                    st.session_state["finsight_anonymous_data"] = profile_data
-                st.session_state.pop("receipt_draft", None)
-                st.session_state.pop("agent_results", None)
-                st.rerun()
+        receipt_draft = st.session_state.get("receipt_draft")
+        if receipt_draft:
+            with st.expander("Review extracted receipt details", expanded=True):
+                if receipt_draft.get("amount") is None:
+                    st.warning("I couldn't confidently find the receipt total. Enter the total below before adding it.")
+                if not receipt_draft.get("date_was_read"):
+                    st.caption("No clear date was detected, so today's date was filled in. You can change it below.")
+                if receipt_draft.get("text"):
+                    with st.expander("Show OCR text"):
+                        st.text(receipt_draft["text"])
+                with st.form("apply_receipt"):
+                    receipt_cols = st.columns(3)
+                    with receipt_cols[0]:
+                        detected_amount = receipt_draft.get("amount")
+                        amount_source = st.radio(
+                            "Receipt amount",
+                            ["Check / correct detected amount", "Enter amount manually"],
+                            horizontal=False,
+                            help="Receipt scanning can misread totals. Always check this value before adding it.",
+                        )
+                        amount_default = float(detected_amount or 0) if amount_source.startswith("Check") else 0.0
+                        receipt_amount = st.number_input(
+                            f"Confirm the amount to record ({currency_code})", min_value=0.0,
+                            value=amount_default, step=0.01, format="%.2f",
+                            help="Edit this number if the scanned total is wrong. The amount you confirm is what gets recorded.",
+                        )
+                    with receipt_cols[1]:
+                        receipt_date = st.date_input("Receipt date", value=receipt_draft["date"])
+                    with receipt_cols[2]:
+                        receipt_category = st.selectbox("Category", sorted(set(transaction_categories + [receipt_draft["category"]])), index=sorted(set(transaction_categories + [receipt_draft["category"]])).index(receipt_draft["category"]))
+                    receipt_merchant = st.text_input("Merchant", value=receipt_draft["merchant"])
+                    apply_receipt = st.form_submit_button("Add receipt to expenses", type="primary", use_container_width=True)
+                if apply_receipt:
+                    transactions.append({"Date": receipt_date.strftime("%Y-%m-%d"), "Category": receipt_category, "Amount ($)": float(receipt_amount), "Note": f"Receipt · {receipt_merchant.strip()}"})
+                    profile_data["transactions"] = transactions
+                    if active_key:
+                        profiles[active_key] = profile_data
+                        save_profiles(profiles)
+                    else:
+                        st.session_state["finsight_anonymous_data"] = profile_data
+                    st.session_state.pop("receipt_draft", None)
+                    st.session_state.pop("agent_results", None)
+                    st.rerun()
 
 with agents_tab:
     st.divider()
@@ -792,7 +836,9 @@ with agents_tab:
 
         with st.expander("Judge Agent review", expanded=True):
             review = findings["judge"]
-            if review["status"] == "Reviewed":
+            if review.get("affordability") == "Not affordable":
+                st.warning(review["summary"])
+            elif review["status"] == "Reviewed":
                 st.success(review["summary"])
             else:
                 st.warning(review["summary"])

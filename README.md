@@ -2,6 +2,8 @@
 
 FinSight is a Streamlit personal-budget planning prototype. It accepts user-entered income, expenses, savings, savings goals, transactions, and an optional purchase decision. Its agents use deterministic Python calculations; there is no bank integration, external language model, payment connection, or money movement.
 
+The optional inflation button can fetch the latest U.S. CPI year-over-year rate from the free FRED API. Without a FRED key, the manual inflation assumption still works. Receipt scanning is optional and only shows the photo controls after the user selects it; OCR is reviewed by the user before a transaction is added.
+
 ## Run locally
 
 ```bash
@@ -22,6 +24,19 @@ Do not commit `profiles.json`, the legacy JSON data files, credentials, or real 
 3. In the app's Secrets settings, add `FINSIGHT_PUBLIC_DEMO = "1"`, then reboot the app.
 4. In the app settings under Sharing, set **Who can view this app** to public. A private source repository does not automatically make its app public.
 5. Open the generated `*.streamlit.app` URL in a private browser window and confirm it works without sign-in. The URL is the public link to share.
+
+## Optional free FRED API key
+
+1. Request a free API key from a St. Louis Fed / FRED account: https://fred.stlouisfed.org/docs/api/api_key.html
+2. For local runs, add this to `.streamlit/secrets.toml` (that file is ignored by Git):
+
+```toml
+FRED_API_KEY = "your-key"
+```
+
+3. For Streamlit Community Cloud, open the app's **Settings → Secrets** and add the same TOML setting there. Do not upload the key to GitHub.
+
+The API feature uses the U.S. CPI series (CPIAUCSL), so it may not be a good inflation estimate for users in other countries or currencies. If no key is configured, users can continue using the manual slider.
 
 Hosting requires connecting a GitHub account and deploying from that account. Do not share personal financial data in the public demo.
 

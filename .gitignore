@@ -8,3 +8,4 @@ users.json
 transactions.json
 goals.json
 .env
+.streamlit/secrets.toml
