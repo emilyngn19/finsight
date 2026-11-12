@@ -18,6 +18,9 @@ class JudgeAgent:
         amount = float(decision.get("amount", 0) or 0)
         symbol = decision.get("currency_symbol", "$")
         recurring = decision.get("kind") == "Monthly recurring"
+        emergency_target = max(0.0, float(decision.get("emergency_reserve_target", 0) or 0))
+        current_savings = float(budget.get("current_savings", 0) or 0)
+        reserve_gap = max(0.0, emergency_target - current_savings)
         if amount > 0:
             if recurring:
                 available = float(budget.get("current_surplus", 0) or 0)
@@ -28,11 +31,21 @@ class JudgeAgent:
                         f"NO — this {symbol}{amount:,.2f} monthly payment is above the amount left after listed expenses. "
                         f"It would leave a shortfall of {symbol}{abs(projected):,.2f} each month."
                     )
+                    if reserve_gap > 0.005:
+                        assessment += f" Your emergency savings are also {symbol}{reserve_gap:,.2f} below the selected target."
                 elif projected <= 0.005:
                     affordability = "Tight"
                     assessment = (
                         f"TIGHT — this payment fits exactly within the {symbol}{available:,.2f} currently left each month, "
                         "leaving no monthly margin for unexpected costs or changes."
+                    )
+                    if reserve_gap > 0.005:
+                        assessment += f" Your emergency savings are {symbol}{reserve_gap:,.2f} below the selected target."
+                elif reserve_gap > 0.005:
+                    affordability = "Tight"
+                    assessment = (
+                        f"TIGHT — this payment fits the monthly budget, but your emergency savings are "
+                        f"{symbol}{reserve_gap:,.2f} below the selected target. Consider building that reserve before adding the payment."
                     )
                 else:
                     affordability = "Affordable"
@@ -41,25 +54,28 @@ class JudgeAgent:
                         "each month after listed expenses."
                     )
             else:
-                available = float(budget.get("current_savings", 0) or 0)
-                remaining = available - amount
-                if remaining < -0.005:
+                available_above_reserve = max(0.0, current_savings - emergency_target)
+                remaining = current_savings - amount
+                reserve_shortfall_after = max(0.0, emergency_target - remaining)
+                if remaining < emergency_target - 0.005:
                     affordability = "Not affordable"
+                    remaining_text = f"-{symbol}{abs(remaining):,.2f}" if remaining < 0 else f"{symbol}{remaining:,.2f}"
                     assessment = (
-                        f"NO — this purchase costs {symbol}{amount:,.2f}, which is {symbol}{abs(remaining):,.2f} "
-                        f"more than your current savings of {symbol}{available:,.2f}."
+                        f"NO — after this {symbol}{amount:,.2f} purchase, you would have about {remaining_text} in savings, "
+                        f"which is {symbol}{reserve_shortfall_after:,.2f} below your {symbol}{emergency_target:,.2f} emergency target. "
+                        f"You currently have only {symbol}{available_above_reserve:,.2f} available without dipping below that target."
                     )
-                elif remaining <= 0.005:
+                elif remaining <= emergency_target + 0.005:
                     affordability = "Tight"
                     assessment = (
-                        f"TIGHT — your savings cover the {symbol}{amount:,.2f} purchase exactly, "
-                        "leaving no savings balance afterward."
+                        f"TIGHT — the purchase would leave about {symbol}{remaining:,.2f}, just your selected emergency reserve, "
+                        "with no savings above it."
                     )
                 else:
                     affordability = "Affordable"
                     assessment = (
-                        f"YES — your current savings cover the {symbol}{amount:,.2f} purchase, "
-                        f"leaving about {symbol}{remaining:,.2f}."
+                        f"YES — after the purchase, about {symbol}{remaining:,.2f} would remain, including "
+                        f"your protected {symbol}{emergency_target:,.2f} emergency reserve."
                     )
         else:
             affordability = "Not assessed"

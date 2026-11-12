@@ -824,6 +824,23 @@ with agents_tab:
             decision_amount = st.number_input(f"Decision amount ({currency_code})", min_value=0.0, value=0.0, step=50.0)
         with decision_cols[1]:
             decision_kind = st.radio("Cost type", ["One-time", "Monthly recurring"], horizontal=True)
+        suggested_emergency_reserve = round(max(0.0, total_expenses) * 3, 2)
+        reserve_default = float(profile_data.get("emergency_reserve_target", suggested_emergency_reserve) or 0)
+        emergency_reserve_target = st.number_input(
+            f"Savings to keep set aside for emergencies ({currency_code})",
+            min_value=0.0, value=reserve_default, step=100.0, format="%.2f",
+            key=f"decision_emergency_reserve_{profile_scope}",
+            help="This amount is protected before a purchase is marked affordable and also updates your Emergency Fund goal.",
+        )
+        if total_expenses > 0:
+            st.caption(
+                f"If you’re unsure, the suggested starting target is {money(suggested_emergency_reserve)} "
+                f"(3 × your listed monthly expenses: {money(total_expenses)}). Your current savings count toward this reserve first. "
+                "Adjust it to fit your needs. The CFPB notes that the right amount depends on your situation; this is a planning estimate, not a one-size-fits-all rule. "
+                "See [CFPB emergency-savings guidance](https://www.consumerfinance.gov/an-essential-guide-to-building-an-emergency-fund/)."
+            )
+        else:
+            st.caption("Enter your monthly expenses to get a suggested target, or enter an emergency-savings amount that fits your situation.")
         run_limit_reached = PUBLIC_DEMO and st.session_state["agent_run_count"] >= MAX_AGENT_RUNS_PER_SESSION
         run_agents = st.form_submit_button(
             "Analyze this decision", type="primary", use_container_width=True, disabled=run_limit_reached
@@ -835,7 +852,36 @@ with agents_tab:
     if run_agents:
         if PUBLIC_DEMO:
             st.session_state["agent_run_count"] += 1
-        decision = {"description": decision_description.strip(), "amount": float(decision_amount), "kind": decision_kind}
+        emergency_reserve_target = float(emergency_reserve_target)
+        profile_data["emergency_reserve_target"] = emergency_reserve_target
+        saved_goals = profile_data.setdefault("goals", [])
+        emergency_goal = next(
+            (goal for goal in saved_goals if "emergency" in str(goal.get("Goal", "")).casefold()),
+            None,
+        )
+        current_savings_for_reserve = max(0.0, float(profile_data.get("savings", 0) or 0))
+        if emergency_goal:
+            emergency_goal["Target ($)"] = emergency_reserve_target
+            emergency_goal["Saved so far ($)"] = min(current_savings_for_reserve, emergency_reserve_target)
+        elif emergency_reserve_target > 0:
+            saved_goals.append({
+                "Goal": "Emergency fund",
+                "Target ($)": emergency_reserve_target,
+                "Saved so far ($)": min(current_savings_for_reserve, emergency_reserve_target),
+                "Monthly contribution ($)": 0.0,
+            })
+        if active_key:
+            profiles[active_key] = profile_data
+            save_profiles(profiles)
+            st.session_state["finsight_profile_data"] = profile_data
+        else:
+            st.session_state["finsight_anonymous_data"] = profile_data
+        decision = {
+            "description": decision_description.strip(),
+            "amount": float(decision_amount),
+            "kind": decision_kind,
+            "emergency_reserve_target": emergency_reserve_target,
+        }
         st.session_state["agent_results"] = orchestrator.analyze(
             profile_data, decision, transactions, currency_symbol, goal_available_surplus
         )
@@ -884,6 +930,16 @@ with agents_tab:
                     })
                 st.dataframe(pd.DataFrame(installment_rows), hide_index=True, use_container_width=True)
                 st.caption("Illustration assumes equal payments at 0% interest with no fees. Actual financing may cost more; check the lender’s total repayment amount and terms.")
+                current_emergency_gap = max(
+                    0.0,
+                    float(decision_data.get("emergency_reserve_target", 0) or 0)
+                    - float(budget_result.get("current_savings", 0) or 0),
+                )
+                if current_emergency_gap > 0.005:
+                    st.caption(
+                        f"Your current savings are {money(current_emergency_gap)} below the emergency target. "
+                        "An installment may preserve cash today, but it does not close that reserve gap."
+                    )
                 if current_surplus > 0:
                     months_to_save = math.ceil(amount / current_surplus)
                     st.write(
