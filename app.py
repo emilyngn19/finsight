@@ -22,6 +22,14 @@ CURRENCIES = {
     "NZD": "NZ$", "JPY": "¥", "INR": "₹", "CNY": "¥", "MXN": "MX$",
     "CHF": "CHF ", "SGD": "S$", "KRW": "₩", "BRL": "R$",
 }
+WORLD_BANK_CURRENCY_UNITS = {
+    "u.s. dollar": "USD", "us dollar": "USD", "united states dollar": "USD",
+    "canadian dollar": "CAD", "euro": "EUR", "pound sterling": "GBP",
+    "australian dollar": "AUD", "new zealand dollar": "NZD", "japanese yen": "JPY",
+    "indian rupee": "INR", "chinese yuan": "CNY", "mexican peso": "MXN",
+    "swiss franc": "CHF", "singapore dollar": "SGD", "south korean won": "KRW",
+    "korean won": "KRW", "brazilian real": "BRL",
+}
 currency_symbol = "$"
 # BLS Consumer Expenditure Survey, 2023–24 two-year geographic means;
 # average annual expenditures per consumer unit (household), published Dec. 2025.
@@ -33,6 +41,15 @@ BLS_AREA_ANNUAL_MEAN = {
     "Los Angeles": 90594, "San Francisco": 117578, "San Diego": 108694,
     "Seattle": 109460, "Phoenix": 97496, "Denver": 102635,
     "Honolulu": 86564, "Anchorage": 90483,
+}
+BLS_AREA_AVERAGE_PEOPLE = {
+    "Boston": 2.1, "New York": 2.5, "Philadelphia": 2.6,
+    "Chicago": 2.4, "Detroit": 2.2, "Minneapolis–St. Paul": 2.3, "St. Louis": 2.3,
+    "Washington, DC": 2.4, "Baltimore": 2.5, "Atlanta": 2.5, "Miami": 2.4,
+    "Dallas–Fort Worth": 2.8, "Houston": 2.8, "Tampa": 2.2,
+    "Los Angeles": 2.9, "San Francisco": 2.3, "San Diego": 2.7,
+    "Seattle": 2.4, "Phoenix": 2.5, "Denver": 2.5,
+    "Honolulu": 2.6, "Anchorage": 2.3,
 }
 DEFAULT_EXPENSES = pd.DataFrame([
     {"Category": "Housing", "Type": "Fixed", "Monthly amount ($)": 0.0},
@@ -93,6 +110,10 @@ def fetch_world_bank_countries():
                 "name": item["name"],
                 "code": code.lower(),
                 "imf_code": str(item.get("id", "")).strip().upper(),
+                "currency_unit": str(item.get("currencyUnit", "")).strip(),
+                "currency_code": WORLD_BANK_CURRENCY_UNITS.get(
+                    str(item.get("currencyUnit", "")).strip().casefold()
+                ),
             })
     return sorted(countries, key=lambda item: item["name"].casefold())
 
@@ -155,6 +176,48 @@ def fetch_latest_country_inflation(country_info):
         raise ValueError(
             f"World Bank unavailable ({world_bank_error}); IMF fallback also failed ({imf_error})."
         ) from imf_error
+
+@st.cache_data(ttl=24 * 60 * 60)
+def fetch_world_bank_national_spending(country_code, household_size):
+    """Estimate monthly national household consumption in local currency.
+
+    Uses the latest common year of per-capita household consumption in PPP
+    international dollars and the household-consumption PPP conversion factor.
+    This is a national planning benchmark, not a city-level statistic.
+    """
+    first_year = date.today().year - 15
+    last_year = date.today().year
+
+    def fetch_indicator(indicator):
+        query = urlencode({
+            "format": "json",
+            "date": f"{first_year}:{last_year}",
+            "per_page": 30,
+        })
+        request_url = (
+            f"https://api.worldbank.org/v2/country/{country_code}/indicator/"
+            f"{indicator}?{query}"
+        )
+        with urlopen(request_url, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return {
+            int(item["date"]): float(item["value"])
+            for item in (payload[1] if len(payload) > 1 and payload[1] else [])
+            if item.get("value") is not None
+        }
+
+    per_capita_ppp = fetch_indicator("NE.CON.PCAP.PP.CD")
+    ppp_factor = fetch_indicator("PA.NUS.PRVT.PP")
+    common_years = sorted(set(per_capita_ppp) & set(ppp_factor))
+    if not common_years:
+        raise ValueError("The World Bank has no matching household-spending observations for this country.")
+    latest_year = common_years[-1]
+    monthly_local_per_person = per_capita_ppp[latest_year] * ppp_factor[latest_year] / 12
+    return {
+        "monthly_average": monthly_local_per_person * float(household_size),
+        "year": latest_year,
+        "source": "World Bank national household consumption estimate (PPP converted to local currency)",
+    }
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -470,6 +533,43 @@ with overview_tab:
         horizon = st.slider("Projection horizon", min_value=6, max_value=60, value=24, step=6, format="%d months")
         annual_return = st.slider("Assumed annual investment return", min_value=0.0, max_value=15.0, value=0.0, step=0.5, format="%.1f%%", help="A hypothetical nominal rate for illustration, not a promised return. Set to 0% to model saving without investment growth.")
         st.session_state.setdefault("annual_inflation", 3.0)
+        try:
+            inflation_countries = fetch_world_bank_countries()
+        except Exception as exc:
+            inflation_countries = []
+            st.warning(f"Could not load the country list from the World Bank API: {exc}. You can still enter local data manually.")
+        old_area = str(profile_data.get("benchmark_area", ""))
+        saved_living_area = str(profile_data.get("living_area", "") or (old_area if old_area in BLS_AREA_ANNUAL_MEAN else profile_data.get("local_inflation_area", "")))
+        living_area = st.text_input(
+            "Your city, region, or nearest town (optional)",
+            value=saved_living_area,
+            placeholder="e.g. Atlanta, Georgia, United States",
+            key=f"living_area_{profile_scope}",
+            help="Used to match a published area spending benchmark when available and to label any local inflation estimate you enter.",
+        )
+        spending_country = None
+        spending_country_code = None
+        spending_country_currency_code = None
+        spending_country_currency_unit = ""
+        if inflation_countries:
+            spending_country_names = [item["name"] for item in inflation_countries]
+            spending_country_by_name = {item["name"]: item for item in inflation_countries}
+            saved_spending_country = profile_data.get(
+                "living_country", profile_data.get("inflation_country", "United States")
+            )
+            if saved_spending_country not in spending_country_names:
+                saved_spending_country = "United States" if "United States" in spending_country_names else spending_country_names[0]
+            spending_country = st.selectbox(
+                "Country for the area benchmark", spending_country_names,
+                index=spending_country_names.index(saved_spending_country),
+                key=f"spending_country_{profile_scope}",
+            )
+            spending_country_info = spending_country_by_name[spending_country]
+            spending_country_code = spending_country_info["code"]
+            spending_country_currency_code = spending_country_info.get("currency_code")
+            spending_country_currency_unit = spending_country_info.get("currency_unit", "")
+        else:
+            spending_country = str(profile_data.get("living_country", ""))
         inflation_basis = st.radio(
             "Inflation estimate",
             ["Country estimate", "Local estimate (manual)"],
@@ -477,25 +577,10 @@ with overview_tab:
             key=f"inflation_basis_{profile_scope}",
             help="Local CPI data is not published consistently for every city or country. Use an official local source when available, or keep the country estimate.",
         )
-        st.caption("If you can’t find an official local CPI rate, keep **Country estimate** and use the latest available national rate, or choose **Local estimate (manual)** to enter a local rate from a source you find.")
-        try:
-            inflation_countries = fetch_world_bank_countries()
-        except Exception as exc:
-            inflation_countries = []
-            st.warning(f"Could not load the country list from the World Bank API: {exc}. The manual inflation input remains available.")
+        st.caption("No local rate handy? Use the country estimate.")
         if inflation_basis == "Country estimate" and inflation_countries:
-            country_names = [item["name"] for item in inflation_countries]
-            country_codes = {item["name"]: item for item in inflation_countries}
-            saved_inflation_country = profile_data.get("inflation_country", "United States")
-            if saved_inflation_country not in country_names:
-                saved_inflation_country = "United States" if "United States" in country_names else country_names[0]
-            inflation_country = st.selectbox(
-                "Country used for the inflation estimate", country_names,
-                index=country_names.index(saved_inflation_country),
-                key=f"inflation_country_{profile_scope}",
-            )
-            if profile_data.get("inflation_country") != inflation_country:
-                profile_data["inflation_country"] = inflation_country
+            if profile_data.get("inflation_country") != spending_country:
+                profile_data["inflation_country"] = spending_country
                 if active_key:
                     profiles[active_key] = profile_data
                     save_profiles(profiles)
@@ -504,22 +589,17 @@ with overview_tab:
                     st.session_state["finsight_anonymous_data"] = profile_data
             if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
                 try:
-                    inflation_data = fetch_latest_country_inflation(country_codes[inflation_country])
+                    inflation_data = fetch_latest_country_inflation(spending_country_by_name[spending_country])
                     st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
                     st.session_state["country_inflation_year"] = inflation_data["year"]
-                    st.session_state["country_inflation_name"] = inflation_country
+                    st.session_state["country_inflation_name"] = spending_country
                     st.session_state["country_inflation_source"] = inflation_data["source"]
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Could not fetch inflation data for {inflation_country}: {exc}")
+                    st.error(f"Could not fetch inflation data for {spending_country}: {exc}")
         if inflation_basis == "Local estimate (manual)":
-            st.caption("Enter a local year-over-year CPI rate from an official statistics agency. FinSight uses this rate in the projection and identifies it as your entered local estimate; it does not fetch city CPI automatically.")
-            local_inflation_area = st.text_input(
-                "City / region for local inflation",
-                value=str(profile_data.get("local_inflation_area", "")),
-                placeholder="e.g. Atlanta, Georgia, United States",
-                key=f"local_inflation_area_{profile_scope}",
-            )
+            local_area_label = f" for {living_area}" if living_area.strip() else ""
+            st.caption(f"Enter the latest annual CPI rate{local_area_label}. This value is used in the projection.")
             local_rate = st.number_input(
                 "Local annual inflation (%)", min_value=-50.0, max_value=10000.0,
                 value=float(profile_data.get("local_inflation_rate", 3.0) or 0.0),
@@ -533,7 +613,7 @@ with overview_tab:
                 key=f"local_inflation_source_{profile_scope}",
             )
             annual_inflation = float(local_rate)
-            profile_data["local_inflation_area"] = local_inflation_area
+            profile_data["local_inflation_area"] = living_area
             profile_data["local_inflation_rate"] = float(local_rate)
             profile_data["local_inflation_source_url"] = local_source_url
             if active_key:
@@ -544,8 +624,9 @@ with overview_tab:
                 st.session_state["finsight_anonymous_data"] = profile_data
             if local_source_url.startswith(("https://", "http://")):
                 st.link_button("Open the source you entered", local_source_url)
-            st.markdown("**Official places to look:** [U.S. BLS CPI by metro area](https://www.bls.gov/charts/consumer-price-index/consumer-price-index-by-metro-area.htm) · [Statistics Canada CPI by geography, table 18-10-0004](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401)")
-            st.caption("Outside these examples, search your country’s national statistics office for ‘CPI by region’ or ‘12-month CPI change’. If it only publishes national CPI, use Country estimate. Local CPI may be released less often than national CPI.")
+            with st.expander("Where to find a local CPI rate (optional)"):
+                st.markdown("[U.S. BLS CPI by metro area](https://www.bls.gov/charts/consumer-price-index/consumer-price-index-by-metro-area.htm) · [Statistics Canada CPI by geography](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401)")
+                st.caption("For other countries, check the national statistics office for regional CPI. If it does not publish a local rate, switch back to Country estimate.")
         else:
             annual_inflation = st.number_input(
                 "Assumed annual inflation (%)", min_value=-50.0, max_value=10000.0,
@@ -560,49 +641,110 @@ with overview_tab:
                     "you can edit the assumption above."
                 )
             st.markdown("[World Bank inflation data source](https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG)")
-        area_choices = ["Skip comparison", *BLS_AREA_ANNUAL_MEAN.keys(), "Other location (enter local average)"]
-        saved_area = profile_data.get("benchmark_area", "Skip comparison")
+        matched_area = next(
+            (area for area in BLS_AREA_ANNUAL_MEAN if area.casefold() in living_area.casefold()),
+            None,
+        )
+        has_published_local_average = (
+            matched_area is not None and currency_code == "USD" and spending_country == "United States"
+        )
+        area_choices = ([f"Use published average for {matched_area}"] if has_published_local_average else [])
+        can_compare_national_currency = (
+            spending_country_code and spending_country_currency_code == currency_code
+        )
+        if can_compare_national_currency:
+            area_choices.append(f"Use national estimate for {spending_country}")
+        elif spending_country_code and living_area.strip():
+            st.caption(
+                f"For a national benchmark in {spending_country_currency_unit or 'the country currency'}, "
+                f"choose its currency in the sidebar. The current app currency is {currency_code}; values are not converted."
+                if spending_country_currency_code
+                else f"A national estimate for {spending_country} is not available in the app's current currency list. Enter a local average or skip."
+            )
+        area_choices += [
+            "Enter a local average", "Skip comparison",
+        ]
+        saved_method = profile_data.get("benchmark_method")
+        if saved_method not in area_choices:
+            saved_method = area_choices[0] if has_published_local_average else (
+                "Enter a local average" if old_area == "Other location (enter local average)" else
+                (f"Use national estimate for {spending_country}" if can_compare_national_currency and living_area.strip() else "Skip comparison")
+            )
         area_choice = st.selectbox(
-            "Living area for spending comparison", area_choices,
-            index=area_choices.index(saved_area) if saved_area in area_choices else 0,
-            key=f"benchmark_area_{profile_scope}",
+            "Compare with", area_choices,
+            index=area_choices.index(saved_method),
+            key=f"benchmark_method_{profile_scope}",
         )
         area_monthly_average = None
         area_benchmark_source = ""
-        if area_choice == "Other location (enter local average)":
-            living_area = st.text_input(
-                "City / region / country", value=profile_data.get("living_area", ""),
-                placeholder="e.g. Vancouver, BC, Canada", key=f"living_area_{profile_scope}",
-            )
+        area_base_date = date.today()
+        manual_area_average = 0.0
+        benchmark_household_size = int(profile_data.get("benchmark_household_size", 1) or 1)
+        if area_choice != "Skip comparison":
+            benchmark_household_size = int(st.number_input(
+                "People in your household", min_value=1, max_value=20,
+                value=benchmark_household_size, step=1,
+                key=f"benchmark_household_size_{profile_scope}",
+                help="Area and country benchmarks are converted to an approximate per-person amount, then scaled to your household size.",
+            ))
+        if area_choice == "Enter a local average":
             manual_area_average = st.number_input(
-                f"Typical monthly household spending in your area ({currency_code})",
-                min_value=0.0, value=float(profile_data.get("local_monthly_average", 0.0)), step=100.0,
+                f"Typical monthly spending per person in your area ({currency_code})",
+                min_value=0.0, value=float(profile_data.get("local_monthly_per_person", 0.0)), step=100.0,
                 key=f"local_average_{profile_scope}",
-                help="Enter a local average from a source you trust. The app does not have comparable official data for every country or city.",
+                help="Enter a local per-person average if you have one. FinSight multiplies it by your household size for the comparison.",
+            )
+            manual_area_source = st.text_input(
+                "Source link (optional)", value=str(profile_data.get("local_spending_source_url", "")),
+                placeholder="Link to a local statistics source", key=f"local_spending_source_{profile_scope}",
             )
             if manual_area_average > 0:
-                area_monthly_average = float(manual_area_average)
+                area_monthly_average = float(manual_area_average) * benchmark_household_size
                 area_benchmark_source = f"your entered estimate for {living_area or 'your area'}"
-        elif area_choice in BLS_AREA_ANNUAL_MEAN:
-            living_area = area_choice
-            if currency_code == "USD":
-                area_monthly_average = BLS_AREA_ANNUAL_MEAN[area_choice] / 12
-                area_benchmark_source = "U.S. Bureau of Labor Statistics 2023–24 mean household expenditures"
-            else:
-                st.info("This published benchmark is in USD. Choose USD, or select Other location to enter a local average in your currency.")
-        else:
-            living_area = ""
-            manual_area_average = 0.0
+                if manual_area_source.startswith(("https://", "http://")):
+                    area_benchmark_source += f" · source: {manual_area_source}"
+        elif can_compare_national_currency and area_choice == f"Use national estimate for {spending_country}":
+            try:
+                national_data = fetch_world_bank_national_spending(spending_country_code, benchmark_household_size)
+                area_monthly_average = float(national_data["monthly_average"])
+                area_base_date = date(int(national_data["year"]), 6, 30)
+                area_benchmark_source = (
+                    f"World Bank {national_data['year']} national household consumption, "
+                    f"scaled to {benchmark_household_size} people"
+                )
+                st.caption("This is a country-level per-person average scaled to your household size, not a city-specific or personalized budget. Make sure the app currency matches the selected country; currency choices only relabel amounts.")
+                st.markdown("[World Bank household consumption per capita data](https://data.worldbank.org/indicator/NE.CON.PCAP.PP.CD) · [PPP conversion factor](https://data.worldbank.org/indicator/PA.NUS.PRVT.PP)")
+            except Exception as exc:
+                st.info(f"No national estimate is available for {spending_country} right now ({exc}). Enter a local average or skip this comparison.")
+        elif has_published_local_average and area_choice.startswith("Use published average"):
+            local_per_person = (
+                BLS_AREA_ANNUAL_MEAN[matched_area]
+                / BLS_AREA_AVERAGE_PEOPLE[matched_area]
+                / 12
+            )
+            area_monthly_average = local_per_person * benchmark_household_size
+            area_benchmark_source = "U.S. Bureau of Labor Statistics 2023–24 area mean, converted to a per-person estimate"
+            area_base_date = date(2024, 6, 30)
+        elif living_area and not has_published_local_average:
+            st.caption("No published local spending benchmark is available for this location yet. Use the country estimate if available, enter a local per-person average, or skip the comparison.")
         area_values_changed = (
-            profile_data.get("benchmark_area") != area_choice
+            profile_data.get("benchmark_method") != area_choice
+            or profile_data.get("benchmark_area") != (matched_area or living_area)
             or profile_data.get("living_area", "") != living_area
-            or float(profile_data.get("local_monthly_average", 0.0)) != float(manual_area_average if area_choice == "Other location (enter local average)" else 0.0)
+            or profile_data.get("living_country", "") != spending_country
+            or int(profile_data.get("benchmark_household_size", 1) or 1) != benchmark_household_size
+            or float(profile_data.get("local_monthly_per_person", 0.0)) != float(manual_area_average if area_choice == "Enter a local average" else 0.0)
+            or profile_data.get("local_spending_source_url", "") != (manual_area_source if area_choice == "Enter a local average" else "")
         )
         if area_values_changed:
             profile_data.update({
-                "benchmark_area": area_choice,
+                "benchmark_method": area_choice,
+                "benchmark_area": matched_area or living_area,
                 "living_area": living_area,
-                "local_monthly_average": float(manual_area_average if area_choice == "Other location (enter local average)" else 0.0),
+                "living_country": spending_country,
+                "local_monthly_per_person": float(manual_area_average if area_choice == "Enter a local average" else 0.0),
+                "local_spending_source_url": manual_area_source if area_choice == "Enter a local average" else "",
+                "benchmark_household_size": benchmark_household_size,
             })
             if active_key:
                 profiles[active_key] = profile_data
@@ -637,7 +779,7 @@ with overview_tab:
         st.caption("The second line discounts the projected balance by your chosen inflation assumption. Both figures are estimates; actual returns and inflation will vary.")
         if area_monthly_average is not None:
             today = date.today()
-            benchmark_years_to_today = max(0.0, (today - date(2024, 6, 30)).days / 365.25)
+            benchmark_years_to_today = max(0.0, (today - area_base_date).days / 365.25)
             annual_inflation_factor = 1 + annual_inflation / 100
             local_average_today = area_monthly_average * (annual_inflation_factor ** benchmark_years_to_today)
             your_future_expenses = total_expenses * (annual_inflation_factor ** (horizon / 12))
@@ -646,9 +788,11 @@ with overview_tab:
             comparison_cols = st.columns(2)
             comparison_cols[0].metric(f"Your monthly expenses in {horizon} months", money(your_future_expenses))
             comparison_cols[1].metric("Area average at that time", money(local_future_average), delta=f"{money(your_future_expenses - local_future_average)} vs. area average", delta_color="inverse")
-            if area_choice in BLS_AREA_ANNUAL_MEAN:
-                st.caption(f"Area benchmark: {area_benchmark_source}. The published 2023–24 average is adjusted to today and the projection horizon using your selected inflation assumption. It represents an average consumer unit, not a household-size-matched estimate; your budget categories may not include every BLS expenditure category.")
+            if area_benchmark_source.startswith("U.S. Bureau of Labor Statistics"):
+                st.caption(f"Area benchmark: {area_benchmark_source}. FinSight divides the area's average annual consumer-unit spending by its average people per unit, then scales that per-person estimate to your household size. It is an approximation adjusted using your selected country inflation rate; your budget categories may not include every BLS expenditure category.")
                 st.markdown("[About the BLS geographic spending averages](https://www.bls.gov/regions/midwest/data/consumerexpenditures_selectedareas_table.htm)")
+            elif area_benchmark_source.startswith("World Bank"):
+                st.caption(f"Area benchmark: {area_benchmark_source}. It is adjusted from the observation year to your projection horizon using the selected inflation assumption. This is an approximate national average, not a city-specific household estimate.")
             else:
                 st.caption("This comparison uses the local monthly average you entered as a starting estimate and applies your selected inflation assumption. It is not a verified area statistic.")
 
