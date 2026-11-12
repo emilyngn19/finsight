@@ -94,19 +94,28 @@ def fetch_world_bank_countries():
 @st.cache_data(ttl=24 * 60 * 60)
 def fetch_latest_country_inflation(country_code):
     """Fetch the latest available annual CPI inflation rate for one country."""
-    query = urlencode({"format": "json", "mrnev": 5, "per_page": 5})
+    latest_year = date.today().year
+    query = urlencode({
+        "format": "json",
+        "date": f"{latest_year - 10}:{latest_year}",
+        "per_page": 12,
+    })
     request_url = (
         f"https://api.worldbank.org/v2/country/{country_code}/indicator/"
         f"FP.CPI.TOTL.ZG?{query}"
     )
-    with urlopen(request_url, timeout=15) as response:
+    with urlopen(request_url, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if len(payload) < 2 or not payload[1]:
         raise ValueError("The World Bank API returned no inflation observations for this country.")
+    observations = []
     for observation in payload[1]:
         value = observation.get("value")
         if value is not None:
-            return {"rate": float(value), "year": str(observation["date"])}
+            observations.append({"rate": float(value), "year": int(observation["date"])})
+    if observations:
+        latest = max(observations, key=lambda item: item["year"])
+        return {"rate": latest["rate"], "year": str(latest["year"])}
     raise ValueError("No reported annual inflation value is available for this country.")
 
 def parse_receipt(text, currency_code="USD"):
