@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import urlopen
 from pathlib import Path
 from datetime import date, datetime
@@ -84,18 +85,26 @@ def get_fred_api_key():
 @st.cache_data(ttl=24 * 60 * 60)
 def fetch_latest_inflation(api_key):
     """Fetch the latest year-over-year U.S. CPI inflation rate from FRED."""
-    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 13})
+    # FRED's pc1 transformation returns the percent change from a year ago,
+    # so the app only needs the newest valid observation instead of 13 raw values.
+    query = urlencode({"series_id": "CPIAUCSL", "api_key": api_key, "file_type": "json", "units": "pc1", "sort_order": "desc", "limit": 1})
     request_url = f"https://api.stlouisfed.org/fred/series/observations?{query}"
-    with urlopen(request_url, timeout=10) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request_url, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+            detail = error_payload.get("error_message", f"FRED returned HTTP {exc.code}.")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            detail = f"FRED returned HTTP {exc.code}."
+        raise ValueError(detail) from exc
+    if payload.get("error_code") or payload.get("error_message"):
+        raise ValueError(payload.get("error_message", "FRED rejected the request."))
     observations = [item for item in payload.get("observations", []) if item.get("value") not in (None, ".")]
-    if len(observations) < 13:
-        raise ValueError("FRED returned fewer than 13 monthly CPI observations.")
-    latest = float(observations[0]["value"])
-    year_ago = float(observations[12]["value"])
-    if year_ago <= 0:
-        raise ValueError("FRED returned an invalid CPI baseline.")
-    return {"rate": (latest / year_ago - 1) * 100, "date": observations[0]["date"]}
+    if not observations:
+        raise ValueError("FRED returned no current CPI inflation observation.")
+    return {"rate": float(observations[0]["value"]), "date": observations[0]["date"]}
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
