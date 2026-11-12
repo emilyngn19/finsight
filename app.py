@@ -88,13 +88,21 @@ def fetch_world_bank_countries():
         code = str(item.get("iso2Code", "")).strip()
         region = item.get("region", {}).get("value", "")
         if code and region != "Aggregates":
-            countries.append({"name": item["name"], "code": code.lower()})
+            countries.append({
+                "name": item["name"],
+                "code": code.lower(),
+                "imf_code": str(item.get("id", "")).strip().upper(),
+            })
     return sorted(countries, key=lambda item: item["name"].casefold())
 
 @st.cache_data(ttl=24 * 60 * 60)
-def fetch_latest_country_inflation(country_code):
-    """Fetch the latest available annual CPI inflation rate for one country."""
+def fetch_latest_country_inflation(country_info):
+    """Fetch annual CPI inflation, falling back to IMF when World Bank is down.
+
+    country_info contains the World Bank ISO alpha-2 and IMF alpha-3 codes.
+    """
     latest_year = date.today().year
+    country_code = country_info["code"]
     query = urlencode({
         "format": "json",
         "date": f"{latest_year - 10}:{latest_year}",
@@ -104,19 +112,48 @@ def fetch_latest_country_inflation(country_code):
         f"https://api.worldbank.org/v2/country/{country_code}/indicator/"
         f"FP.CPI.TOTL.ZG?{query}"
     )
-    with urlopen(request_url, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if len(payload) < 2 or not payload[1]:
-        raise ValueError("The World Bank API returned no inflation observations for this country.")
-    observations = []
-    for observation in payload[1]:
-        value = observation.get("value")
-        if value is not None:
-            observations.append({"rate": float(value), "year": int(observation["date"])})
-    if observations:
-        latest = max(observations, key=lambda item: item["year"])
-        return {"rate": latest["rate"], "year": str(latest["year"])}
-    raise ValueError("No reported annual inflation value is available for this country.")
+    world_bank_error = None
+    for attempt in range(2):
+        try:
+            with urlopen(request_url, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            observations = [] if len(payload) < 2 or not payload[1] else [
+                {"rate": float(item["value"]), "year": int(item["date"])}
+                for item in payload[1] if item.get("value") is not None
+            ]
+            if observations:
+                latest = max(observations, key=lambda item: item["year"])
+                return {"rate": latest["rate"], "year": str(latest["year"]), "source": "World Bank"}
+            world_bank_error = "no reported value was returned"
+            break
+        except Exception as exc:
+            world_bank_error = str(exc)
+    # The IMF DataMapper API is a free, keyless backup for country-level WEO
+    # inflation data; its latest year can be an official estimate/forecast.
+    try:
+        imf_code = str(country_info.get("imf_code", "")).strip().upper()
+        if not imf_code:
+            raise ValueError("No IMF country code is available for this selection.")
+        imf_url = f"https://www.imf.org/external/datamapper/api/v1/PCPIPCH/{imf_code}"
+        with urlopen(imf_url, timeout=15) as response:
+            imf_payload = json.loads(response.read().decode("utf-8"))
+        values = imf_payload.get("values", {}).get("PCPIPCH", {}).get(imf_code, {})
+        observations = [
+            {"rate": float(value), "year": int(year)}
+            for year, value in values.items()
+            if value is not None and int(year) <= date.today().year
+        ]
+        if observations:
+            latest = max(observations, key=lambda item: item["year"])
+            return {
+                "rate": latest["rate"], "year": str(latest["year"]),
+                "source": "IMF DataMapper (latest available estimate; may be a forecast)",
+            }
+        raise ValueError("The IMF returned no annual inflation value for this country.")
+    except Exception as imf_error:
+        raise ValueError(
+            f"World Bank unavailable ({world_bank_error}); IMF fallback also failed ({imf_error})."
+        ) from imf_error
 
 def parse_receipt(text, currency_code="USD"):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -427,7 +464,7 @@ with overview_tab:
             st.warning(f"Could not load the country list from the World Bank API: {exc}. The manual inflation input remains available.")
         if inflation_countries:
             country_names = [item["name"] for item in inflation_countries]
-            country_codes = {item["name"]: item["code"] for item in inflation_countries}
+            country_codes = {item["name"]: item for item in inflation_countries}
             saved_inflation_country = profile_data.get("inflation_country", "United States")
             if saved_inflation_country not in country_names:
                 saved_inflation_country = "United States" if "United States" in country_names else country_names[0]
@@ -450,6 +487,7 @@ with overview_tab:
                     st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
                     st.session_state["country_inflation_year"] = inflation_data["year"]
                     st.session_state["country_inflation_name"] = inflation_country
+                    st.session_state["country_inflation_source"] = inflation_data["source"]
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not fetch inflation data for {inflation_country}: {exc}")
@@ -460,7 +498,8 @@ with overview_tab:
         )
         if st.session_state.get("country_inflation_year"):
             st.caption(
-                f"World Bank annual CPI rate for {st.session_state['country_inflation_name']}: "
+                f"{st.session_state.get('country_inflation_source', 'Official annual CPI rate')} for "
+                f"{st.session_state['country_inflation_name']}: "
                 f"{st.session_state['country_inflation_year']}. The published value may lag current prices; "
                 "you can edit the assumption above."
             )
