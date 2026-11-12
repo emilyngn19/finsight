@@ -463,7 +463,7 @@ with overview_tab:
             inflation_countries = fetch_world_bank_countries()
         except Exception as exc:
             inflation_countries = []
-            st.warning(f"Could not load the country list from the World Bank API: {exc}. You can still enter local data manually.")
+            st.warning(f"Could not load the country list from the World Bank API: {exc}. You can still enter an inflation assumption manually.")
         spending_country = None
         if inflation_countries:
             spending_country_names = [item["name"] for item in inflation_countries]
@@ -481,84 +481,45 @@ with overview_tab:
             spending_country_info = spending_country_by_name[spending_country]
         else:
             spending_country = str(profile_data.get("living_country", ""))
-        inflation_basis = st.radio(
-            "Inflation estimate",
-            ["Country estimate", "Local estimate (manual)"],
-            horizontal=True,
-            key=f"inflation_basis_{profile_scope}",
-            help="Local CPI data is not published consistently for every city or country. Use an official local source when available, or keep the country estimate.",
-        )
-        st.caption("No local rate handy? Use the country estimate.")
-        if inflation_basis == "Country estimate" and inflation_countries:
-            if profile_data.get("inflation_country") != spending_country:
-                profile_data["inflation_country"] = spending_country
-                if active_key:
-                    profiles[active_key] = profile_data
-                    save_profiles(profiles)
-                    st.session_state["finsight_profile_data"] = profile_data
-                else:
-                    st.session_state["finsight_anonymous_data"] = profile_data
-            if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
-                try:
-                    inflation_data = fetch_latest_country_inflation(spending_country_by_name[spending_country])
-                    st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
-                    st.session_state["country_inflation_year"] = inflation_data["year"]
-                    st.session_state["country_inflation_name"] = spending_country
-                    st.session_state["country_inflation_source"] = inflation_data["source"]
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Could not fetch inflation data for {spending_country}: {exc}")
-        if inflation_basis == "Local estimate (manual)":
-            living_area = st.text_input(
-                "City or region (optional)",
-                value=str(profile_data.get("local_inflation_area", "")),
-                placeholder="e.g. Atlanta, Georgia, United States",
-                key=f"local_inflation_area_{profile_scope}",
-                help="Used only to label the local inflation rate you enter.",
-            )
-            local_area_label = f" for {living_area}" if living_area.strip() else ""
-            st.caption(f"Enter the latest annual CPI rate{local_area_label}. This value is used in the projection.")
-            local_rate = st.number_input(
-                "Local annual inflation (%)", min_value=-50.0, max_value=10000.0,
-                value=float(profile_data.get("local_inflation_rate", 3.0) or 0.0),
-                step=0.1, format="%.1f", key=f"local_inflation_rate_{profile_scope}",
-                help="Use the official 12-month CPI change for your city/region, where available. Do not enter a cost-of-living level or a monthly rate.",
-            )
-            local_source_url = st.text_input(
-                "Official source link (optional)",
-                value=str(profile_data.get("local_inflation_source_url", "")),
-                placeholder="Paste the statistics agency page URL",
-                key=f"local_inflation_source_{profile_scope}",
-            )
-            annual_inflation = float(local_rate)
-            profile_data["local_inflation_area"] = living_area
-            profile_data["local_inflation_rate"] = float(local_rate)
-            profile_data["local_inflation_source_url"] = local_source_url
+            spending_country_info = None
+        if spending_country:
+            profile_data["inflation_country"] = spending_country
             if active_key:
                 profiles[active_key] = profile_data
                 save_profiles(profiles)
                 st.session_state["finsight_profile_data"] = profile_data
             else:
                 st.session_state["finsight_anonymous_data"] = profile_data
-            if local_source_url.startswith(("https://", "http://")):
-                st.link_button("Open the source you entered", local_source_url)
-            with st.expander("Where to find a local CPI rate (optional)"):
-                st.markdown("[U.S. BLS CPI by metro area](https://www.bls.gov/charts/consumer-price-index/consumer-price-index-by-metro-area.htm) · [Statistics Canada CPI by geography](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401)")
-                st.caption("For other countries, check the national statistics office for regional CPI. If it does not publish a local rate, switch back to Country estimate.")
-        else:
-            annual_inflation = st.number_input(
-                "Assumed annual inflation (%)", min_value=-50.0, max_value=10000.0,
-                step=0.1, format="%.1f", key="annual_inflation",
-                help="Load the latest available country rate from the free World Bank API, or enter your own estimate. Country data is annual and may lag current prices.",
-            )
-            if st.session_state.get("country_inflation_year"):
-                st.caption(
-                    f"{st.session_state.get('country_inflation_source', 'Official annual CPI rate')} for "
-                    f"{st.session_state['country_inflation_name']}: "
-                    f"{st.session_state['country_inflation_year']}. The published value may lag current prices; "
-                    "you can edit the assumption above."
+        st.caption("FinSight uses a country-level annual CPI rate. Published data may lag current prices; you can adjust the planning assumption below.")
+        if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
+            try:
+                if not spending_country_info:
+                    raise ValueError("The country list is unavailable. Enter an annual inflation assumption manually.")
+                inflation_data = fetch_latest_country_inflation(spending_country_info)
+                inflation_data["url"] = (
+                    "https://www.imf.org/external/datamapper/PCPIPCH@WEO"
+                    if "IMF" in inflation_data["source"]
+                    else "https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG"
                 )
-            st.markdown("[World Bank inflation data source](https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG)")
+                st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
+                st.session_state["inflation_rate_year"] = inflation_data["year"]
+                st.session_state["inflation_rate_name"] = spending_country
+                st.session_state["inflation_rate_source"] = inflation_data["source"]
+                st.session_state["inflation_rate_url"] = inflation_data["url"]
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not fetch country inflation data: {exc}. You can enter an assumption manually.")
+        annual_inflation = st.number_input(
+            "Annual inflation used (%)", min_value=-50.0, max_value=10000.0,
+            step=0.1, format="%.1f", key="annual_inflation",
+            help="This is the country-level annual rate used in the projection. Use the button above to fetch the latest published value, or enter an assumption manually.",
+        )
+        if st.session_state.get("inflation_rate_year"):
+            st.caption(
+                f"{st.session_state.get('inflation_rate_source', 'Official CPI')} country rate for "
+                f"{st.session_state['inflation_rate_name']}: {st.session_state['inflation_rate_year']}. This published rate can lag current prices."
+            )
+            st.markdown(f"[Open the data source]({st.session_state['inflation_rate_url']})")
         if contribution > max(0.0, monthly_surplus):
             st.warning("This contribution is higher than your current monthly surplus. The projection assumes you can still make it.")
     with forecast_right:
