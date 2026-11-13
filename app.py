@@ -52,7 +52,7 @@ def money(value):
 
 @st.cache_resource
 def get_receipt_ocr_engine():
-    from rapidocr_onnxruntime import RapidOCR
+    from rapidocr import RapidOCR
     return RapidOCR()
 
 def read_receipt_image(image_bytes, suffix):
@@ -60,8 +60,8 @@ def read_receipt_image(image_bytes, suffix):
         image_file.write(image_bytes)
         image_path = image_file.name
     try:
-        results, _ = get_receipt_ocr_engine()(image_path)
-        return "\n".join(str(item[1]) for item in (results or []) if len(item) > 1).strip()
+        result = get_receipt_ocr_engine()(image_path)
+        return "\n".join(str(line) for line in (getattr(result, "txts", None) or [])).strip()
     finally:
         os.unlink(image_path)
 
@@ -759,7 +759,7 @@ with activity_tab:
                     if not extracted_text:
                         st.warning("I couldn't read text from that photo. Try a clearer, well-lit picture with the full receipt in frame.")
                 except ImportError:
-                    st.error("Receipt OCR is not installed in the Python environment running Streamlit. Stop the app, install the packages in requirements.txt, then restart it.")
+                    st.error("Receipt reading is unavailable in this deployment. Confirm the latest requirements.txt was pushed to GitHub, then reboot the Streamlit app so it installs the OCR packages.")
                 except Exception as exc:
                     st.error(f"Could not read this receipt: {exc}")
 
