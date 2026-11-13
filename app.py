@@ -450,101 +450,107 @@ with overview_tab:
         st.download_button("Download budget sheet (CSV)", display_df.to_csv(index=False), file_name="finsight_monthly_budget.csv", mime="text/csv")
         st.caption(f"Fixed: {money(fixed_total)}  ·  Flexible: {money(variable_total)}")
 
-    st.divider()
-    st.markdown('<div class="eyebrow">FORWARD VIEW / SCENARIO</div>', unsafe_allow_html=True)
-    st.subheader("03 / A possible savings trajectory")
-    forecast_left, forecast_right = st.columns([1, 1.5])
-    with forecast_left:
-        contribution = st.number_input(f"Monthly amount to save or invest ({currency_code})", min_value=0.0, value=float(max(0.0, monthly_surplus)), step=50.0, key="forecast_contribution")
-        horizon = st.slider("Projection horizon", min_value=6, max_value=60, value=24, step=6, format="%d months")
-        annual_return = st.slider("Assumed annual investment return", min_value=0.0, max_value=15.0, value=0.0, step=0.5, format="%.1f%%", help="A hypothetical nominal rate for illustration, not a promised return. Set to 0% to model saving without investment growth.")
-        st.session_state.setdefault("annual_inflation", 3.0)
-        try:
-            inflation_countries = fetch_world_bank_countries()
-        except Exception as exc:
-            inflation_countries = []
-            st.warning(f"Could not load the country list from the World Bank API: {exc}. You can still enter an inflation assumption manually.")
-        spending_country = None
-        if inflation_countries:
-            spending_country_names = [item["name"] for item in inflation_countries]
-            spending_country_by_name = {item["name"]: item for item in inflation_countries}
-            saved_spending_country = profile_data.get(
-                "inflation_country", profile_data.get("living_country", "United States")
-            )
-            if saved_spending_country not in spending_country_names:
-                saved_spending_country = "United States" if "United States" in spending_country_names else spending_country_names[0]
-            spending_country = st.selectbox(
-                "Country for inflation estimate", spending_country_names,
-                index=spending_country_names.index(saved_spending_country),
-                key=f"spending_country_{profile_scope}",
-            )
-            spending_country_info = spending_country_by_name[spending_country]
-        else:
-            spending_country = str(profile_data.get("living_country", ""))
-            spending_country_info = None
-        if spending_country:
-            profile_data["inflation_country"] = spending_country
-            if active_key:
-                profiles[active_key] = profile_data
-                save_profiles(profiles)
-                st.session_state["finsight_profile_data"] = profile_data
-            else:
-                st.session_state["finsight_anonymous_data"] = profile_data
-        st.caption("FinSight uses a country-level annual CPI rate. Published data may lag current prices; you can adjust the planning assumption below.")
-        if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
+    if monthly_surplus > 0:
+        st.divider()
+        st.markdown('<div class="eyebrow">FORWARD VIEW / SCENARIO</div>', unsafe_allow_html=True)
+        st.subheader("03 / A possible savings trajectory")
+        forecast_left, forecast_right = st.columns([1, 1.5])
+        with forecast_left:
+            contribution = st.number_input(f"Monthly amount to save or invest ({currency_code})", min_value=0.0, value=float(max(0.0, monthly_surplus)), step=50.0, key="forecast_contribution")
+            horizon = st.slider("Projection horizon", min_value=6, max_value=60, value=24, step=6, format="%d months")
+            annual_return = st.slider("Assumed annual investment return", min_value=0.0, max_value=15.0, value=0.0, step=0.5, format="%.1f%%", help="A hypothetical nominal rate for illustration, not a promised return. Set to 0% to model saving without investment growth.")
+            st.session_state.setdefault("annual_inflation", 3.0)
             try:
-                if not spending_country_info:
-                    raise ValueError("The country list is unavailable. Enter an annual inflation assumption manually.")
-                inflation_data = fetch_latest_country_inflation(spending_country_info)
-                inflation_data["url"] = (
-                    "https://www.imf.org/external/datamapper/PCPIPCH@WEO"
-                    if "IMF" in inflation_data["source"]
-                    else "https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG"
-                )
-                st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
-                st.session_state["inflation_rate_year"] = inflation_data["year"]
-                st.session_state["inflation_rate_name"] = spending_country
-                st.session_state["inflation_rate_source"] = inflation_data["source"]
-                st.session_state["inflation_rate_url"] = inflation_data["url"]
-                st.rerun()
+                inflation_countries = fetch_world_bank_countries()
             except Exception as exc:
-                st.error(f"Could not fetch country inflation data: {exc}. You can enter an assumption manually.")
-        annual_inflation = st.number_input(
-            "Annual inflation used (%)", min_value=-50.0, max_value=10000.0,
-            step=0.1, format="%.1f", key="annual_inflation",
-            help="This is the country-level annual rate used in the projection. Use the button above to fetch the latest published value, or enter an assumption manually.",
-        )
-        if st.session_state.get("inflation_rate_year"):
-            st.caption(
-                f"{st.session_state.get('inflation_rate_source', 'Official CPI')} country rate for "
-                f"{st.session_state['inflation_rate_name']}: {st.session_state['inflation_rate_year']}. This published rate can lag current prices."
+                inflation_countries = []
+                st.warning(f"Could not load the country list from the World Bank API: {exc}. You can still enter an inflation assumption manually.")
+            spending_country = None
+            if inflation_countries:
+                spending_country_names = [item["name"] for item in inflation_countries]
+                spending_country_by_name = {item["name"]: item for item in inflation_countries}
+                saved_spending_country = profile_data.get(
+                    "inflation_country", profile_data.get("living_country", "United States")
+                )
+                if saved_spending_country not in spending_country_names:
+                    saved_spending_country = "United States" if "United States" in spending_country_names else spending_country_names[0]
+                spending_country = st.selectbox(
+                    "Country for inflation estimate", spending_country_names,
+                    index=spending_country_names.index(saved_spending_country),
+                    key=f"spending_country_{profile_scope}",
+                )
+                spending_country_info = spending_country_by_name[spending_country]
+            else:
+                spending_country = str(profile_data.get("living_country", ""))
+                spending_country_info = None
+            if spending_country:
+                profile_data["inflation_country"] = spending_country
+                if active_key:
+                    profiles[active_key] = profile_data
+                    save_profiles(profiles)
+                    st.session_state["finsight_profile_data"] = profile_data
+                else:
+                    st.session_state["finsight_anonymous_data"] = profile_data
+            st.caption("FinSight uses a country-level annual CPI rate. Published data may lag current prices; you can adjust the planning assumption below.")
+            if st.button("Use latest available country inflation", key=f"fetch_country_inflation_{profile_scope}"):
+                try:
+                    if not spending_country_info:
+                        raise ValueError("The country list is unavailable. Enter an annual inflation assumption manually.")
+                    inflation_data = fetch_latest_country_inflation(spending_country_info)
+                    inflation_data["url"] = (
+                        "https://www.imf.org/external/datamapper/PCPIPCH@WEO"
+                        if "IMF" in inflation_data["source"]
+                        else "https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG"
+                    )
+                    st.session_state["annual_inflation"] = round(float(inflation_data["rate"]), 1)
+                    st.session_state["inflation_rate_year"] = inflation_data["year"]
+                    st.session_state["inflation_rate_name"] = spending_country
+                    st.session_state["inflation_rate_source"] = inflation_data["source"]
+                    st.session_state["inflation_rate_url"] = inflation_data["url"]
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not fetch country inflation data: {exc}. You can enter an assumption manually.")
+            annual_inflation = st.number_input(
+                "Annual inflation used (%)", min_value=-50.0, max_value=10000.0,
+                step=0.1, format="%.1f", key="annual_inflation",
+                help="This is the country-level annual rate used in the projection. Use the button above to fetch the latest published value, or enter an assumption manually.",
             )
-            st.markdown(f"[Open the data source]({st.session_state['inflation_rate_url']})")
-        if contribution > max(0.0, monthly_surplus):
-            st.warning("This contribution is higher than your current monthly surplus. The projection assumes you can still make it.")
-    with forecast_right:
-        monthly_rate = (1 + annual_return / 100) ** (1 / 12) - 1
-        monthly_inflation = (1 + annual_inflation / 100) ** (1 / 12) - 1
-        nominal_balance = savings
-        balances = []
-        for month in range(horizon + 1):
-            real_balance = nominal_balance / ((1 + monthly_inflation) ** month)
-            balances.append({
-                "Month": month,
-                f"Projected balance ({currency_code})": round(nominal_balance, 2),
-                f"Inflation-adjusted balance ({currency_code})": round(real_balance, 2),
-            })
-            nominal_balance = nominal_balance * (1 + monthly_rate) + contribution
-        forecast_df = pd.DataFrame(balances)
-        st.line_chart(
-            forecast_df.set_index("Month"),
-            y=[f"Projected balance ({currency_code})", f"Inflation-adjusted balance ({currency_code})"],
-            color=["#53f1df", "#a78bfa"], use_container_width=True,
+            if st.session_state.get("inflation_rate_year"):
+                st.caption(
+                    f"{st.session_state.get('inflation_rate_source', 'Official CPI')} country rate for "
+                    f"{st.session_state['inflation_rate_name']}: {st.session_state['inflation_rate_year']}. This published rate can lag current prices."
+                )
+                st.markdown(f"[Open the data source]({st.session_state['inflation_rate_url']})")
+            if contribution > max(0.0, monthly_surplus):
+                st.warning("This contribution is higher than your current monthly surplus. The projection assumes you can still make it.")
+        with forecast_right:
+            monthly_rate = (1 + annual_return / 100) ** (1 / 12) - 1
+            monthly_inflation = (1 + annual_inflation / 100) ** (1 / 12) - 1
+            nominal_balance = savings
+            balances = []
+            for month in range(horizon + 1):
+                real_balance = nominal_balance / ((1 + monthly_inflation) ** month)
+                balances.append({
+                    "Month": month,
+                    f"Projected balance ({currency_code})": round(nominal_balance, 2),
+                    f"Inflation-adjusted balance ({currency_code})": round(real_balance, 2),
+                })
+                nominal_balance = nominal_balance * (1 + monthly_rate) + contribution
+            forecast_df = pd.DataFrame(balances)
+            st.line_chart(
+                forecast_df.set_index("Month"),
+                y=[f"Projected balance ({currency_code})", f"Inflation-adjusted balance ({currency_code})"],
+                color=["#53f1df", "#a78bfa"], use_container_width=True,
+            )
+            projected_cols = st.columns(2)
+            projected_cols[0].metric(f"Future balance in {horizon} months", money(forecast_df.iloc[-1][f"Projected balance ({currency_code})"]))
+            projected_cols[1].metric(f"In today’s purchasing power", money(forecast_df.iloc[-1][f"Inflation-adjusted balance ({currency_code})"]))
+            st.caption("The second line discounts the projected balance by your chosen inflation assumption. Both figures are estimates; actual returns and inflation will vary.")
+    else:
+        st.caption(
+            f"A savings trajectory will appear when your income is higher than your monthly expenses. "
+            f"Your current amount left after expenses is {money(monthly_surplus)}."
         )
-        projected_cols = st.columns(2)
-        projected_cols[0].metric(f"Future balance in {horizon} months", money(forecast_df.iloc[-1][f"Projected balance ({currency_code})"]))
-        projected_cols[1].metric(f"In today’s purchasing power", money(forecast_df.iloc[-1][f"Inflation-adjusted balance ({currency_code})"]))
-        st.caption("The second line discounts the projected balance by your chosen inflation assumption. Both figures are estimates; actual returns and inflation will vary.")
 
 with activity_tab:
     if active_key:
